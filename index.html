@@ -34,7 +34,7 @@ const storage = getStorage(app);
 
 let currentUser = null, currentRole = null, unsubListeners = [];
 
-/* ══ AUDIO SYNTHESIS ══ */
+/* ══ AUDIO SYNTHESIS (الصوت) ══ */
 let audioCtx = null;
 function playAlertSound() {
   try {
@@ -72,13 +72,11 @@ onAuthStateChanged(auth, async (user) => {
     } else {
       showScreen("screen-member");
       startMemberListeners();
-      // تحديث بيانات العضو في القائمة الجانبية الجديدة
       document.getElementById("drawerMemberName").textContent = data.name || "عضو";
       document.getElementById("drawerMemberDept").textContent = data.department || "عام";
       document.getElementById("drawerMemberAvatar").textContent = (data.name||"أ")[0];
       document.getElementById("memberAvatar").textContent = (data.name||"أ")[0];
     }
-    
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   } else {
     currentUser=null; currentRole=null; window._userData=null;
@@ -121,8 +119,6 @@ window.closeDrawer = function() {
   document.getElementById("drawer").classList.remove("open");
   document.getElementById("drawerOverlay").classList.remove("open");
 };
-
-// القائمة الجانبية الخاصة بالعضو
 window.openMemberDrawer = function() {
   document.getElementById("memberDrawer").classList.add("open");
   document.getElementById("memberDrawerOverlay").classList.add("open");
@@ -216,13 +212,11 @@ function renderMembersTable(members) {
 }
 
 window.toggleMember=async function(uid,cur){
-  try{await updateDoc(doc(db,"users",uid),{isActive:!cur});showToast(cur?"🔒 تم التعطيل":"✅ تم التفعيل","success");loadMembers();}
-  catch(e){}
+  try{await updateDoc(doc(db,"users",uid),{isActive:!cur});showToast(cur?"🔒 تم التعطيل":"✅ تم التفعيل","success");loadMembers();}catch(e){}
 };
 window.deleteMember=async function(uid,name){
   if(!confirm(`حذف ${name}؟`))return;
-  try{await deleteDoc(doc(db,"users",uid));showToast(`🗑️ تم الحذف`,"success");loadMembers();}
-  catch(e){}
+  try{await deleteDoc(doc(db,"users",uid));showToast(`🗑️ تم الحذف`,"success");loadMembers();}catch(e){}
 };
 window.editMember=function(uid,name,email,role,dept){
   document.getElementById("mName").value=name;
@@ -240,8 +234,7 @@ window.updateMember=async function(uid){
   const role=document.getElementById("mRole").value;
   const department=document.getElementById("mDept").value;
   if(!name){showToast("⚠️ أدخل الاسم","warning");return;}
-  try{await updateDoc(doc(db,"users",uid),{name,role,department});showToast("✅ تم التحديث","success");closeMemberModal();loadMembers();}
-  catch(e){}
+  try{await updateDoc(doc(db,"users",uid),{name,role,department});showToast("✅ تم التحديث","success");closeMemberModal();loadMembers();}catch(e){}
 };
 window.openMemberModal=()=>document.getElementById("memberModal").classList.add("visible");
 window.openNewMemberModal=function(){
@@ -281,10 +274,7 @@ window.sendTask=async function(editTaskId = null){
       fileUrl = await getDownloadURL(fileRef);
     }
 
-    const taskData = {
-      title, content, category, priority, notifType, fileUrl,
-      status: "pending"
-    };
+    const taskData = { title, content, category, priority, notifType, fileUrl, status: "pending" };
 
     if(editTaskId) {
        await updateDoc(doc(db, "tasks", editTaskId), taskData);
@@ -310,7 +300,7 @@ window.sendTask=async function(editTaskId = null){
     window._editFileUrl = null;
     window.selectNone();
     showAdminTab("overview");
-  }catch(e){showToast("❌ حدث خطأ في الإرسال","error"); console.log(e);}
+  }catch(e){showToast("❌ حدث خطأ في الإرسال","error");}
   btn.disabled=false; btn.textContent=editTaskId ? "حفظ التعديل" : "📤 إرسال التوجيه";
   btn.onclick = () => sendTask(); 
 };
@@ -320,13 +310,11 @@ window.editAdminTask = async function(id, title, content, priority, fileUrl) {
   document.getElementById("fContent").value = content;
   window._editFileUrl = fileUrl !== 'null' ? fileUrl : null;
   window._selectedPriority = priority;
-  
   const btn = document.getElementById("btnSend");
   btn.textContent = "💾 حفظ التعديل";
   btn.onclick = () => sendTask(id);
   showAdminTab("send");
 };
-
 window.deleteAdminTask = async function(id) {
   if(confirm("هل أنت متأكد من حذف هذا التوجيه بالكامل؟")) {
     await deleteDoc(doc(db, "tasks", id));
@@ -334,8 +322,10 @@ window.deleteAdminTask = async function(id) {
   }
 };
 
-/* ══ MEMBER PORTAL ══ */
+/* ══ MEMBER PORTAL (المهام כعناوين) ══ */
+window._memberTasksMap = {}; // خريطة لتخزين تفاصيل المهام
 let isFirstTaskLoad = true;
+
 function startMemberListeners(){
   loadMembers();
   const u=onSnapshot(query(collection(db,"taskAssignments"),where("userId","==",currentUser.uid)),async snap=>{
@@ -365,12 +355,24 @@ async function renderMemberTasks(assignments,filter){
   window._currentFilter=filter;
   const list=document.getElementById("memberTaskList");
   const tasksData=[];
+  
   for(const a of assignments){
-    try{const ts=await getDoc(doc(db,"tasks",a.taskId));if(ts.exists())tasksData.push({a,t:{id:ts.id,...ts.data()}});}catch(e){}
+    try{
+      const ts=await getDoc(doc(db,"tasks",a.taskId));
+      if(ts.exists()) {
+        const tData = {id:ts.id,...ts.data()};
+        tasksData.push({a, t: tData});
+        window._memberTasksMap[a.id] = {a, t: tData}; // حفظ بالخريطة للنافذة المنبثقة
+      }
+    }catch(e){}
   }
+  
   let filtered=tasksData;
   if(filter==="urgent")filtered=tasksData.filter(x=>x.t.priority==="عاجل");
   else if(filter==="done")filtered=tasksData.filter(x=>x.a.status==="completed");
+  
+  // ترتيب من الأحدث للأقدم
+  filtered.sort((x, y) => (y.t.createdAt?.toMillis()||0) - (x.t.createdAt?.toMillis()||0));
   
   if(!filtered.length){list.innerHTML=`<div class="empty-card">📭<br>لا توجد مهام هنا</div>`;return;}
   
@@ -379,51 +381,81 @@ async function renderMemberTasks(assignments,filter){
     const pb=t.priority==="عاجل"?"chip-red":t.priority==="مهم"?"chip-orange":"chip-blue";
     const cb=t.category==="متابعة عاجلة"?"chip-red":t.category==="حملات إعلامية"?"chip-purple":"chip-blue";
     const ts2=t.createdAt?.toDate?t.createdAt.toDate().toLocaleTimeString("ar",{hour:"2-digit",minute:"2-digit"}):"—";
+    const statusLabel = a.status==="pending"?"معلق":a.status==="in_progress"?"جاري":"مكتمل";
+    const statusColor = a.status==="pending"?"chip-gray":a.status==="in_progress"?"chip-orange":"chip-green";
     
-    return `<div class="task-card ${isUnread?"unread":""} ${isCrit?"critical":""}" onclick="openTask('${a.id}')">
-      <div class="task-card-top">
-        <div class="task-chips">
+    // التصميم الجديد: كرت مصغر يظهر كعنوان فقط
+    return `<div class="task-card ${isUnread?"unread":""} ${isCrit?"critical":""}" onclick="openTaskDetailsModal('${a.id}')" style="padding:12px; display:flex; align-items:center; justify-content:space-between; cursor:pointer;">
+      <div style="flex:1; overflow:hidden;">
+        <div style="font-size:14px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-bottom:6px;">${t.title}</div>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
           ${isCrit?'<span class="chip chip-red">🚨 حرج</span>':""}
           <span class="chip ${pb}">${t.priority}</span>
           <span class="chip ${cb}">${t.category}</span>
+          <span class="chip ${statusColor}" style="font-size:10px;">${statusLabel}</span>
           ${isUnread?'<span class="chip chip-accent">جديد</span>':""}
         </div>
-        <span class="task-time">${ts2}</span>
       </div>
-      <div class="task-title">${t.title}</div>
-      <div class="task-body">${(t.content||"").replace(/\n/g, '<br>')}</div>
-      ${t.fileUrl ? `<a href="${t.fileUrl}" target="_blank" class="chip chip-gray" style="margin-bottom:10px; display:inline-block; text-decoration:none;">📎 تحميل المرفق</a>` : ''}
-      
-      <div class="task-footer" style="flex-wrap: wrap; gap: 8px; justify-content: space-between; align-items: center; border-top: 1px solid var(--border); padding-top: 10px; margin-top: 5px;">
-        <div style="display:flex; flex:1; gap:8px;">
-          <input type="text" id="note_${a.id}" placeholder="اكتب ملاحظة للإدارة..." value="${a.note || ''}" style="flex:1; padding:6px 10px; border-radius:8px; border:1px solid var(--border); background:var(--surface2); color:#fff; font-size:12px;">
-          <button class="icon-btn ok" style="width:auto; padding:0 10px; font-size:12px;" onclick="event.stopPropagation(); saveTaskNote('${a.id}')">إرسال الملاحظة</button>
-        </div>
-        <select class="status-select" onclick="event.stopPropagation()" onchange="updateStatus('${a.id}',this.value)">
-          <option value="pending" ${a.status==="pending"?"selected":""}>⏳ معلق</option>
-          <option value="in_progress" ${a.status==="in_progress"?"selected":""}>⚡ جاري</option>
-          <option value="completed" ${a.status==="completed"?"selected":""}>✅ مكتمل</option>
-        </select>
-      </div>
+      <span style="font-size:11px; color:var(--text-dim); margin-right:10px; white-space:nowrap;">${ts2}</span>
     </div>`;
   }).join("");
 }
 
-window.saveTaskNote = async function(assignmentId) {
-  const noteText = document.getElementById(`note_${assignmentId}`).value.trim();
-  try {
-    await updateDoc(doc(db, "taskAssignments", assignmentId), { note: noteText, statusUpdatedAt: serverTimestamp() });
-    showToast("✅ تم إرسال الملاحظة للمدير", "success");
-  } catch(e) { showToast("❌ خطأ في الإرسال", "error"); }
+// فتح نافذة تفاصيل المهمة
+window.openTaskDetailsModal = async function(assignmentId) {
+  const data = window._memberTasksMap[assignmentId];
+  if(!data) return;
+  
+  window._currentOpenTaskId = assignmentId;
+
+  // تسجيل الفتح إذا كانت جديدة
+  if(!data.a.openedAt) {
+    try { await updateDoc(doc(db,"taskAssignments",assignmentId),{openedAt:serverTimestamp()}); } catch(e){}
+  }
+
+  document.getElementById("tdTitle").textContent = data.t.title;
+  document.getElementById("tdContent").innerHTML = (data.t.content||"").replace(/\n/g, '<br>');
+  
+  const fileCont = document.getElementById("tdFileContainer");
+  if(data.t.fileUrl) {
+    fileCont.innerHTML = `<a href="${data.t.fileUrl}" target="_blank" class="chip chip-blue" style="text-decoration:none; padding:8px 14px; font-size:13px; display:inline-block;">📎 اضغط هنا لتحميل الملف المرفق</a>`;
+  } else {
+    fileCont.innerHTML = "";
+  }
+
+  document.getElementById("tdNote").value = data.a.note || "";
+  document.getElementById("tdStatus").value = data.a.status || "pending";
+
+  document.getElementById("taskDetailsModal").classList.add("visible");
 };
 
-window.openTask=async function(id){
-  try{await updateDoc(doc(db,"taskAssignments",id),{openedAt:serverTimestamp()});}catch(e){}
+window.closeTaskDetailsModal = () => document.getElementById("taskDetailsModal").classList.remove("visible");
+
+window.saveTaskDetails = async function() {
+  const id = window._currentOpenTaskId;
+  const status = document.getElementById("tdStatus").value;
+  const note = document.getElementById("tdNote").value.trim();
+
+  const btn = document.getElementById("btnSaveTaskDetails");
+  btn.textContent = "⏳ جاري الحفظ...";
+  btn.disabled = true;
+
+  try {
+    await updateDoc(doc(db, "taskAssignments", id), {
+      status: status,
+      note: note,
+      statusUpdatedAt: serverTimestamp()
+    });
+    showToast("✅ تم حفظ التعديلات وإرسال الملاحظة", "success");
+    closeTaskDetailsModal();
+  } catch(e) {
+    showToast("❌ خطأ أثناء الحفظ", "error");
+  }
+  
+  btn.textContent = "حفظ التعديلات";
+  btn.disabled = false;
 };
-window.updateStatus=async function(id,s){
-  try{await updateDoc(doc(db,"taskAssignments",id),{status:s,statusUpdatedAt:serverTimestamp()});
-  showToast(`📊 ${s==="pending"?"معلق":s==="in_progress"?"جاري":"مكتمل"}`,"success");}catch(e){}
-};
+
 window.filterMemberTasks=function(filter,el){
   document.querySelectorAll(".filter-btn").forEach(b=>b.classList.remove("active"));
   el.classList.add("active");
@@ -440,21 +472,12 @@ function showCriticalModal(task,assignmentId){
   document.getElementById("criticalModal").dataset.assignmentId=assignmentId||"";
   playAlertSound(); 
 }
-
 window.acknowledgeAlert = function() {
   const modal = document.getElementById("criticalModal");
   const id = modal.dataset.assignmentId;
-  
   modal.classList.remove("visible");
   showToast("✅ تم الاستلام", "success");
-
-  if(id) {
-    updateDoc(doc(db, "taskAssignments", id), {
-      acknowledgedAt: serverTimestamp(),
-      openedAt: serverTimestamp(),
-      status: "in_progress"
-    }).catch(e => console.log(e));
-  }
+  if(id) { updateDoc(doc(db, "taskAssignments", id), { acknowledgedAt: serverTimestamp(), openedAt: serverTimestamp(), status: "in_progress" }).catch(e=>{}); }
 };
 window.closeModal=()=>document.getElementById("criticalModal").classList.remove("visible");
 
@@ -470,10 +493,7 @@ function renderAdminTasks(tasks){
     const ts=t.createdAt?.toDate?t.createdAt.toDate().toLocaleTimeString("ar",{hour:"2-digit",minute:"2-digit"}):"—";
     return `<div class="task-card">
       <div class="task-card-top">
-        <div class="task-chips">
-          <span class="chip ${pb}">${t.priority}</span>
-          <span class="chip ${sb}">${sl}</span>
-        </div>
+        <div class="task-chips"><span class="chip ${pb}">${t.priority}</span><span class="chip ${sb}">${sl}</span></div>
         <span class="task-time">${ts}</span>
       </div>
       <div class="task-title">${t.title}</div>
@@ -503,14 +523,11 @@ function renderTracking(assignments){
         <div class="tracking-avatar">${(mn)[0]}</div>
         <div class="tracking-info">
           <div class="tracking-name">${mn}</div>
-          <div class="tracking-meta">
-            <span class="${dd?"dot-blue":"dot-gray"}"></span> وصل ${st}
-            <span class="${od?"dot-green":"dot-gray"}" style="margin-right:8px"></span> فُتح ${ot}
-          </div>
+          <div class="tracking-meta"><span class="${dd?"dot-blue":"dot-gray"}"></span> وصل ${st} <span class="${od?"dot-green":"dot-gray"}" style="margin-right:8px"></span> فُتح ${ot}</div>
         </div>
         <span class="chip ${sb}">${sl}</span>
       </div>
-      ${a.note ? `<div style="margin-top:8px; padding:6px 10px; background:var(--surface2); border-radius:6px; font-size:12px; color:var(--accent); width:100%;">💬 ملاحظة: ${a.note}</div>` : ''}
+      ${a.note ? `<div style="margin-top:8px; padding:6px 10px; background:var(--surface2); border-radius:6px; font-size:12px; color:var(--accent); width:100%;">💬 ملاحظة العضو: ${a.note}</div>` : ''}
     </div>`;
   }).join("");
 }
@@ -556,9 +573,9 @@ function loadChatUsers() {
   const list = document.getElementById("chatUsersList");
   let usersToShow = window._members || [];
   if(currentRole !== 'admin') {
-    usersToShow = usersToShow.filter(u => u.role === 'admin');
+    usersToShow = usersToShow.filter(u => u.role === 'admin'); // العضو يراسل المدراء فقط
   } else {
-    usersToShow = usersToShow.filter(u => u.id !== currentUser.uid);
+    usersToShow = usersToShow.filter(u => u.id !== currentUser.uid); // المدير يرى الجميع
   }
   
   list.innerHTML = usersToShow.map(u => `
@@ -579,9 +596,17 @@ window.openChatWith = function(uid, name) {
   
   const chatId = currentUser.uid < uid ? `${currentUser.uid}_${uid}` : `${uid}_${currentUser.uid}`;
   
-  // اضافة تعقب الأخطاء (Error Handling) للمراسلة
-  window._chatUnsub = onSnapshot(query(collection(db, "messages"), where("chatId", "==", chatId), orderBy("createdAt", "asc")), snap => {
-    const msgs = snap.docs.map(d => d.data());
+  // ✅ التحديث المهم لحل مشكلة عدم ظهور الرسائل (الاستغناء عن orderBy التي تتطلب Index)
+  window._chatUnsub = onSnapshot(query(collection(db, "messages"), where("chatId", "==", chatId)), snap => {
+    
+    // جلب الرسائل وترتيبها برمجياً لتجنب مشاكل الفهرس (Index) في فايربيس
+    let msgs = snap.docs.map(d => d.data());
+    msgs.sort((a,b) => {
+       const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : Date.now();
+       const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : Date.now();
+       return timeA - timeB;
+    });
+
     const container = document.getElementById("chatMessages");
     container.innerHTML = msgs.map(m => `
       <div style="margin-bottom:8px; text-align:${m.senderId === currentUser.uid ? 'left' : 'right'};">
@@ -590,6 +615,8 @@ window.openChatWith = function(uid, name) {
         </span>
       </div>
     `).join("");
+    
+    // التمرير للأسفل لرؤية أحدث رسالة
     container.scrollTop = container.scrollHeight;
     
     if (!isFirstChatLoad) {
@@ -598,31 +625,29 @@ window.openChatWith = function(uid, name) {
     }
     isFirstChatLoad = false;
   }, error => {
-    console.error("Chat Read Error:", error);
-    showToast("❌ غير مصرح لك بقراءة الرسائل (يرجى تعديل قواعد Firebase)", "error");
+    console.error("خطأ في قراءة الرسائل:", error);
   });
 };
 
 window.sendChatMessage = async function() {
   const input = document.getElementById("chatInput");
   const text = input.value.trim();
-  if(!text) { showToast("⚠️ اكتب رسالة أولاً", "warning"); return; }
+  if(!text) return;
   if(!window._currentChatUser) { showToast("⚠️ لم يتم تحديد مستخدم للمراسلة", "warning"); return; }
 
   const uid = window._currentChatUser;
   const chatId = currentUser.uid < uid ? `${currentUser.uid}_${uid}` : `${uid}_${currentUser.uid}`;
   
   try {
+    input.value = ""; // تفريغ الخانة فوراً لسرعة الاستجابة
     await addDoc(collection(db, "messages"), {
       chatId, senderId: currentUser.uid, receiverId: uid, text, createdAt: serverTimestamp()
     });
-    input.value = "";
   } catch(e) {
     console.error("Chat Write Error:", e);
-    showToast("❌ فشل الإرسال. تأكد من قواعد الأمان (Firestore Rules)", "error");
+    showToast("❌ فشل الإرسال.", "error");
   }
 };
-
 
 /* ══ PROFILE ══ */
 window.openProfileModal = function() {
@@ -654,15 +679,44 @@ window.showAdminTab=function(tab){
   closeDrawer();
   if(tab==="members")loadMembers();
 };
-
 window.showScreen=id=>{document.querySelectorAll(".screen").forEach(s=>s.classList.remove("active"));document.getElementById(id).classList.add("active");};
 window.showToast=function(msg,type){const c=document.getElementById("toastContainer"),t=document.createElement("div");t.className=`toast ${type||""}`;t.innerHTML=msg;c.appendChild(t);setTimeout(()=>{t.style.opacity="0";t.style.transition="all .3s";setTimeout(()=>t.remove(),300);},3000);};
-
 </script>
 </head>
 <body>
 
 <div class="toast-container" id="toastContainer"></div>
+
+<div class="modal-overlay" id="taskDetailsModal">
+  <div class="modal-sheet">
+    <div id="tdTitle" style="font-size: 18px; font-weight: bold; margin-bottom: 12px; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 10px;">عنوان المهمة</div>
+    
+    <div id="tdContent" style="font-size: 14px; color: var(--text-muted); margin-bottom: 15px; line-height: 1.6; max-height: 40vh; overflow-y: auto;">
+      تفاصيل المهمة...
+    </div>
+    
+    <div id="tdFileContainer" style="margin-bottom: 15px;"></div>
+
+    <div style="background: var(--surface2); padding: 12px; border-radius: var(--r-sm); margin-bottom: 15px;">
+      <label style="font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 8px;">إرسال ملاحظة للإدارة (اختياري)</label>
+      <textarea id="tdNote" style="width: 100%; background: var(--surface); border: 1px solid var(--border); color: #fff; padding: 10px; border-radius: 8px; resize: vertical; min-height: 60px; font-family: inherit; font-size:13px;" placeholder="اكتب ملاحظاتك هنا لتصل للمدير..."></textarea>
+    </div>
+
+    <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 15px;">
+      <label style="font-size: 13px; color: var(--text-muted);">حالة المهمة:</label>
+      <select id="tdStatus" style="flex: 1; padding: 10px; background: var(--surface2); border: 1px solid var(--border); color: #fff; border-radius: var(--r-sm); outline:none;">
+        <option value="pending">⏳ معلق</option>
+        <option value="in_progress">⚡ جاري التنفيذ</option>
+        <option value="completed">✅ مكتملة</option>
+      </select>
+    </div>
+
+    <div class="modal-form-btns">
+      <button class="modal-cancel" onclick="closeTaskDetailsModal()">إغلاق</button>
+      <button class="modal-confirm" id="btnSaveTaskDetails" onclick="saveTaskDetails()">حفظ التعديلات</button>
+    </div>
+  </div>
+</div>
 
 <div class="modal-overlay" id="criticalModal">
   <div class="modal-sheet critical-sheet">
@@ -738,7 +792,6 @@ window.showToast=function(msg,type){const c=document.getElementById("toastContai
   </div>
 </div>
 
-
 <div class="screen active" id="screen-login">
   <div class="login-wrap">
     <div class="login-logo">
@@ -752,7 +805,6 @@ window.showToast=function(msg,type){const c=document.getElementById("toastContai
     <button class="login-btn" id="btnLogin" onclick="doLogin()">دخول</button>
   </div>
 </div>
-
 
 <div class="screen" id="screen-admin">
   <div class="drawer-overlay" id="drawerOverlay" onclick="closeDrawer()"></div>
@@ -869,7 +921,6 @@ window.showToast=function(msg,type){const c=document.getElementById("toastContai
     <button class="bottom-nav-btn" onclick="showAdminTab('members')"><div class="nav-icon">👥</div>الأعضاء</button>
   </div>
 </div>
-
 
 <div class="screen" id="screen-member">
 
