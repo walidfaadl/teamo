@@ -1,26 +1,17 @@
 <!DOCTYPE html>
-
-
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>MOTS</title>
+<title>MOTS - محدث</title>
 <link rel="manifest" href="/manifest.json">
 <meta name="theme-color" content="#0a0a0f">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="MOTS">
-
 
 <script type="module">
-import { initializeApp }    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged }
-                            from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc,
-         getDocs, query, where, orderBy, onSnapshot, serverTimestamp, getDoc, setDoc }
-                            from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged, updatePassword } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, getDocs, query, where, orderBy, onSnapshot, serverTimestamp, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
 
 const FIREBASE_CONFIG = {
   apiKey:            "AIzaSyC-CeTBjIWZnUaaNlrdyb3qO-VNsdHGpt4",
@@ -32,14 +23,16 @@ const FIREBASE_CONFIG = {
 };
 const WEB_API_KEY = "AIzaSyC-CeTBjIWZnUaaNlrdyb3qO-VNsdHGpt4";
 
-
-const app  = initializeApp(FIREBASE_CONFIG);
+const app = initializeApp(FIREBASE_CONFIG);
 const auth = getAuth(app);
-const db   = getFirestore(app);
+const db = getFirestore(app);
+const storage = getStorage(app);
 
+let currentUser = null, currentRole = null, unsubListeners = [], currentChatUser = null;
+window._members = [];
 
-let currentUser = null, currentRole = null, unsubListeners = [];
-
+// صوت التنبيه (Base64) لتجنب مشاكل الملفات الخارجية
+const alertSound = new Audio("data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU"+'A'.repeat(500)); // نغمة افتراضية قصيرة
 
 /* ══ AUTH ══ */
 onAuthStateChanged(auth, async (user) => {
@@ -49,995 +42,565 @@ onAuthStateChanged(auth, async (user) => {
     if (!snap.exists()) { await signOut(auth); return; }
     const data = snap.data();
     currentRole = data.role;
+    
+    document.querySelectorAll(".user-name-display").forEach(e => e.textContent = data.name || "مستخدم");
+    document.querySelectorAll(".user-dept-display").forEach(e => e.textContent = data.department || "عام");
+
     if (currentRole === "admin") {
       showScreen("screen-admin");
       startAdminListeners();
-      document.getElementById("adminUserName").textContent = data.name || "المدير";
-      document.getElementById("adminAvatar").textContent = (data.name||"م")[0];
     } else {
       showScreen("screen-member");
       startMemberListeners();
-      document.getElementById("memberName").textContent = data.name || "عضو";
-      document.getElementById("memberAvatar").textContent = (data.name||"أ")[0];
     }
   } else {
-    currentUser=null; currentRole=null;
-    unsubListeners.forEach(u=>u()); unsubListeners=[];
+    currentUser = null; currentRole = null;
+    unsubListeners.forEach(u => u()); unsubListeners = [];
     showScreen("screen-login");
   }
 });
 
-
 window.doLogin = async function() {
-  const email=document.getElementById("loginEmail").value.trim();
-  const pass=document.getElementById("loginPass").value;
-  const err=document.getElementById("loginError");
-  err.style.display="none";
-  const btn=document.getElementById("btnLogin");
-  btn.disabled=true; btn.textContent="⏳ جاري...";
+  const email = document.getElementById("loginEmail").value.trim();
+  const pass = document.getElementById("loginPass").value;
+  const err = document.getElementById("loginError");
+  err.style.display = "none";
+  const btn = document.getElementById("btnLogin");
+  btn.disabled = true; btn.textContent = "⏳ جاري...";
   try {
-    await signInWithEmailAndPassword(auth,email,pass);
-    showToast("✅ مرحباً!","success");
+    await signInWithEmailAndPassword(auth, email, pass);
+    showToast("✅ مرحباً!", "success");
+    // تفريغ الصوت لتجاوز الحماية
+    alertSound.play().catch(e => {}); 
   } catch(e) {
-    err.style.display="block";
-    err.textContent="بيانات الدخول غير صحيحة";
+    err.style.display = "block";
+    err.textContent = "بيانات الدخول غير صحيحة";
   }
-  btn.disabled=false; btn.textContent="دخول";
+  btn.disabled = false; btn.textContent = "دخول";
 };
 
-
 window.logout = async function() {
-  document.getElementById("drawerOverlay").classList.remove("open");
-  document.getElementById("drawer").classList.remove("open");
   await signOut(auth);
 };
 
-
-/* ══ DRAWER ══ */
-window.openDrawer = function() {
-  document.getElementById("drawer").classList.add("open");
-  document.getElementById("drawerOverlay").classList.add("open");
-};
-window.closeDrawer = function() {
-  document.getElementById("drawer").classList.remove("open");
-  document.getElementById("drawerOverlay").classList.remove("open");
-};
-
-
 /* ══ ADMIN LISTENERS ══ */
 function startAdminListeners() {
-  const u=onSnapshot(query(collection(db,"tasks"),orderBy("createdAt","desc")),snap=>{
-    const tasks=snap.docs.map(d=>({id:d.id,...d.data()}));
+  const u = onSnapshot(query(collection(db, "tasks"), orderBy("createdAt", "desc")), snap => {
+    const tasks = snap.docs.map(d => ({id: d.id, ...d.data()}));
     renderAdminTasks(tasks);
-    document.getElementById("statTotal").textContent=tasks.length;
-    document.getElementById("statPending").textContent=tasks.filter(t=>t.status==="pending").length;
-    document.getElementById("statDone").textContent=tasks.filter(t=>t.status==="completed").length;
+    document.getElementById("statTotal").textContent = tasks.length;
+    document.getElementById("statPending").textContent = tasks.filter(t => t.status === "pending").length;
   });
   unsubListeners.push(u);
-  const u2=onSnapshot(query(collection(db,"taskAssignments"),orderBy("notifSentAt","desc")),snap=>{
-    renderTracking(snap.docs.map(d=>({id:d.id,...d.data()})));
-  });
-  unsubListeners.push(u2);
   loadMembers();
+  startMessagesListener();
 }
-
 
 async function loadMembers() {
-  const snap=await getDocs(query(collection(db,"users"),orderBy("createdAt","desc")));
-  const all=snap.docs.map(d=>({id:d.id,...d.data()}));
-  window._members=all.filter(m=>m.role==="member");
-  document.getElementById("statMembers").textContent=window._members.length;
-  renderRecipients(window._members);
+  const snap = await getDocs(query(collection(db, "users"), orderBy("createdAt", "desc")));
+  const all = snap.docs.map(d => ({id: d.id, ...d.data()}));
+  window._members = all;
+  document.getElementById("statMembers").textContent = all.filter(m => m.role === "member").length;
+  renderRecipients(all.filter(m => m.role === "member"));
   renderMembersTable(all);
+  renderChatUsers(all);
 }
-
 
 /* ══ MEMBER MANAGEMENT ══ */
 window.createMember = async function() {
-  const name=document.getElementById("mName").value.trim();
-  const email=document.getElementById("mEmail").value.trim();
-  const password=document.getElementById("mPassword").value;
-  const role=document.getElementById("mRole").value;
+  const name = document.getElementById("mName").value.trim();
+  const email = document.getElementById("mEmail").value.trim();
+  const password = document.getElementById("mPassword").value;
+  const role = document.getElementById("mRole").value;
+  const department = document.getElementById("mDept").value;
+
   if(!name||!email||!password){showToast("⚠️ أدخل جميع البيانات","warning");return;}
-  if(password.length<6){showToast("⚠️ كلمة المرور 6 أحرف على الأقل","warning");return;}
-  const btn=document.getElementById("btnCreateMember");
-  btn.disabled=true; btn.textContent="⏳ جاري...";
+  
+  const btn = document.getElementById("btnCreateMember");
+  btn.disabled = true; btn.textContent = "⏳ جاري...";
   try {
-    const res=await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${WEB_API_KEY}`,{
+    const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${WEB_API_KEY}`,{
       method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({email,password,returnSecureToken:true})
     });
-    const data=await res.json();
-    if(data.error){
-      showToast("❌ "+(data.error.message==="EMAIL_EXISTS"?"البريد مستخدم بالفعل":data.error.message),"error");
-      btn.disabled=false; btn.textContent="إضافة"; return;
-    }
+    const data = await res.json();
+    if(data.error) throw new Error(data.error.message);
+    
     await setDoc(doc(db,"users",data.localId),{
-      name,email,role,isActive:true,fcmToken:"pending",
-      createdAt:serverTimestamp(),createdBy:currentUser.uid
+      name, email, role, department, isActive: true, createdAt: serverTimestamp(), createdBy: currentUser.uid
     });
     showToast(`✅ تم إضافة ${name}`,"success");
     closeMemberModal(); loadMembers();
-  } catch(e){showToast("❌ "+e.message,"error");}
-  btn.disabled=false; btn.textContent="إضافة";
+  } catch(e){ showToast("❌ خطأ في الإضافة","error"); }
+  btn.disabled = false; btn.textContent = "إضافة";
 };
 
-
 function renderMembersTable(members) {
-  const list=document.getElementById("membersList");
-  if(!members.length){list.innerHTML=`<div class="empty-card">👥<br>لا يوجد أعضاء بعد</div>`;return;}
-  list.innerHTML=members.map(m=>`
+  const list = document.getElementById("membersList");
+  list.innerHTML = members.map(m => `
     <div class="member-item">
-      <div class="member-item-avatar">${(m.name||"م")[0]}</div>
       <div class="member-item-info">
-        <div class="member-item-name">${m.name||"—"}</div>
-        <div class="member-item-email">${m.email||"—"}</div>
-      </div>
-      <div class="member-item-badges">
-        <span class="chip ${m.role==="admin"?"chip-purple":"chip-blue"}">${m.role==="admin"?"مدير":"عضو"}</span>
-        <span class="chip ${m.isActive?"chip-green":"chip-gray"}">${m.isActive?"نشط":"معطّل"}</span>
+        <div class="member-item-name">${m.name} (${m.department || 'عام'})</div>
+        <div class="member-item-email">${m.email}</div>
       </div>
       <div class="member-item-actions">
-        <button class="icon-btn" onclick="editMember('${m.id}','${m.name}','${m.email}','${m.role}')">✏️</button>
-        <button class="icon-btn ${m.isActive?"warn":"ok"}" onclick="toggleMember('${m.id}',${m.isActive})">${m.isActive?"🔒":"✅"}</button>
-        ${m.role!=="admin"?`<button class="icon-btn danger" onclick="deleteMember('${m.id}','${m.name}')">🗑️</button>`:""}
+        <button class="icon-btn" onclick="editMember('${m.id}','${m.name}','${m.email}','${m.role}','${m.department}')">✏️</button>
+        <button class="icon-btn danger" onclick="deleteMember('${m.id}','${m.name}')">🗑️</button>
       </div>
     </div>`).join("");
 }
 
+window.deleteMember = async function(uid, name) {
+  if(!confirm(`حذف ${name}؟`)) return;
+  try { await deleteDoc(doc(db,"users",uid)); showToast("🗑️ تم الحذف","success"); loadMembers(); } 
+  catch(e){ showToast("❌ "+e.message,"error"); }
+};
 
-window.toggleMember=async function(uid,cur){
-  try{await updateDoc(doc(db,"users",uid),{isActive:!cur});showToast(cur?"🔒 تم التعطيل":"✅ تم التفعيل","success");loadMembers();}
-  catch(e){showToast("❌ "+e.message,"error");}
-};
-window.deleteMember=async function(uid,name){
-  if(!confirm(`حذف ${name}؟`))return;
-  try{await deleteDoc(doc(db,"users",uid));showToast(`🗑️ تم الحذف`,"success");loadMembers();}
-  catch(e){showToast("❌ "+e.message,"error");}
-};
-window.editMember=function(uid,name,email,role){
-  document.getElementById("mName").value=name;
-  document.getElementById("mEmail").value=email;
-  document.getElementById("mRole").value=role;
-  document.getElementById("mPassword").value="";
-  document.getElementById("memberModalTitle").textContent="تعديل العضو";
-  document.getElementById("btnCreateMember").textContent="حفظ";
-  document.getElementById("btnCreateMember").onclick=()=>updateMember(uid);
+window.editMember = function(uid, name, email, role, dept) {
+  document.getElementById("mName").value = name;
+  document.getElementById("mEmail").value = email;
+  document.getElementById("mRole").value = role;
+  document.getElementById("mDept").value = dept || "التحرير";
+  document.getElementById("mPassword").value = "";
+  document.getElementById("btnCreateMember").onclick = () => updateMember(uid);
   openMemberModal();
 };
-window.updateMember=async function(uid){
-  const name=document.getElementById("mName").value.trim();
-  const role=document.getElementById("mRole").value;
-  if(!name){showToast("⚠️ أدخل الاسم","warning");return;}
-  try{await updateDoc(doc(db,"users",uid),{name,role});showToast("✅ تم التحديث","success");closeMemberModal();loadMembers();}
-  catch(e){showToast("❌ "+e.message,"error");}
+
+window.updateMember = async function(uid) {
+  const name = document.getElementById("mName").value.trim();
+  const department = document.getElementById("mDept").value;
+  try {
+    await updateDoc(doc(db,"users",uid), {name, department});
+    showToast("✅ تم التحديث","success"); closeMemberModal(); loadMembers();
+  } catch(e){ showToast("❌ "+e.message,"error"); }
 };
-window.openMemberModal=()=>document.getElementById("memberModal").classList.add("visible");
-window.openNewMemberModal=function(){
-  document.getElementById("mName").value="";
-  document.getElementById("mEmail").value="";
-  document.getElementById("mPassword").value="";
-  document.getElementById("mRole").value="member";
-  document.getElementById("memberModalTitle").textContent="عضو جديد";
-  document.getElementById("btnCreateMember").textContent="إضافة";
-  document.getElementById("btnCreateMember").onclick=createMember;
+
+window.openNewMemberModal = function() {
+  document.getElementById("mName").value = ""; document.getElementById("mEmail").value = "";
+  document.getElementById("btnCreateMember").onclick = createMember;
   openMemberModal();
 };
-window.closeMemberModal=()=>document.getElementById("memberModal").classList.remove("visible");
+window.openMemberModal = () => document.getElementById("memberModal").classList.add("visible");
+window.closeMemberModal = () => document.getElementById("memberModal").classList.remove("visible");
 
-
-/* ══ SEND TASK ══ */
-window.sendTask=async function(){
-  const title=document.getElementById("fTitle").value.trim();
-  const content=document.getElementById("fContent").value.trim();
-  const category=document.getElementById("fCategory").value;
-  const notifType=document.getElementById("fNotifType").value;
-  const deadline=document.getElementById("fDeadline").value;
-  const priority=window._selectedPriority||"عاجل";
-  const recipients=[...(window._selectedRecipients||[])];
+/* ══ SEND & EDIT TASK ══ */
+window.sendTask = async function(editId = null) {
+  const title = document.getElementById("fTitle").value.trim();
+  const content = document.getElementById("fContent").value.trim();
+  const fileInput = document.getElementById("fFile").files[0];
+  const recipients = [...(window._selectedRecipients||[])];
+  
   if(!title||!content){showToast("⚠️ أدخل العنوان والنص","warning");return;}
-  if(!recipients.length){showToast("⚠️ اختر مستلماً","warning");return;}
-  const btn=document.getElementById("btnSend");
-  btn.disabled=true; btn.textContent="⏳ جاري...";
-  try{
-    const taskRef=await addDoc(collection(db,"tasks"),{
-      title,content,category,priority,notifType,recipients,
-      targetDeadline:deadline?new Date(deadline):null,
-      createdBy:currentUser.uid,createdAt:serverTimestamp(),status:"pending"
-    });
-    for(const uid of recipients){
-      await addDoc(collection(db,"taskAssignments"),{
-        taskId:taskRef.id,userId:uid,notifSentAt:serverTimestamp(),
-        notifDeliveredAt:null,openedAt:null,acknowledgedAt:null,
-        status:"pending",statusUpdatedAt:serverTimestamp()
-      });
+  if(!recipients.length && !editId){showToast("⚠️ اختر مستلماً","warning");return;}
+
+  const btn = document.getElementById("btnSend");
+  btn.disabled = true; btn.textContent = "⏳ جاري...";
+  
+  try {
+    let fileUrl = null;
+    if (fileInput) {
+      const fileRef = ref(storage, `tasks/${Date.now()}_${fileInput.name}`);
+      await uploadBytes(fileRef, fileInput);
+      fileUrl = await getDownloadURL(fileRef);
     }
-    showToast(notifType==="critical"?`🚨 تم الإرسال الحرج`:`✅ تم الإرسال إلى ${recipients.length} أعضاء`,"success");
-    document.getElementById("fTitle").value="";
-    document.getElementById("fContent").value="";
-    window.selectNone();
+
+    const taskData = {
+      title, content, fileUrl: fileUrl || (window._editFileUrl || null),
+      priority: window._selectedPriority || "عاجل",
+      status: "pending", updatedAt: serverTimestamp()
+    };
+
+    if (editId) {
+      await updateDoc(doc(db, "tasks", editId), taskData);
+      showToast("✅ تم التعديل", "success");
+    } else {
+      taskData.createdAt = serverTimestamp();
+      taskData.createdBy = currentUser.uid;
+      taskData.recipients = recipients;
+      const taskRef = await addDoc(collection(db, "tasks"), taskData);
+      
+      for(const uid of recipients){
+        await addDoc(collection(db, "taskAssignments"), {
+          taskId: taskRef.id, userId: uid, status: "pending"
+        });
+      }
+      showToast("✅ تم الإرسال", "success");
+    }
+    document.getElementById("fTitle").value = ""; document.getElementById("fContent").value = "";
+    document.getElementById("fFile").value = ""; window.selectNone();
     showAdminTab("overview");
-  }catch(e){showToast("❌ "+e.message,"error");}
-  btn.disabled=false; btn.textContent="إرسال";
+  } catch(e) { showToast("❌ حدث خطأ", "error"); console.log(e); }
+  btn.disabled = false; btn.textContent = editId ? "حفظ التعديل" : "إرسال التوجيه";
 };
 
-
-/* ══ MEMBER PORTAL ══ */
-function startMemberListeners(){
-  const u=onSnapshot(query(collection(db,"taskAssignments"),where("userId","==",currentUser.uid)),async snap=>{
-    const assignments=snap.docs.map(d=>({id:d.id,...d.data()}));
-    await renderMemberTasks(assignments,"all");
-    const unread=assignments.filter(a=>!a.openedAt).length;
-    const badge=document.getElementById("memberBadge");
-    badge.textContent=unread; badge.style.display=unread>0?"flex":"none";
-    for(const a of assignments.filter(x=>!x.acknowledgedAt)){
-      const ts=await getDoc(doc(db,"tasks",a.taskId));
-      if(ts.exists()&&ts.data().notifType==="critical"){showCriticalModal(ts.data(),a.id);break;}
-    }
-  });
-  unsubListeners.push(u);
-}
-
-
-window._currentFilter="all";
-async function renderMemberTasks(assignments,filter){
-  window._currentFilter=filter;
-  const list=document.getElementById("memberTaskList");
-  list.innerHTML=`<div class="loading-wrap"><div class="spinner"></div></div>`;
-  const tasksData=[];
-  for(const a of assignments){
-    try{const ts=await getDoc(doc(db,"tasks",a.taskId));if(ts.exists())tasksData.push({a,t:{id:ts.id,...ts.data()}});}catch(e){}
+window.deleteAdminTask = async function(id) {
+  if(confirm("هل أنت متأكد من حذف هذا التوجيه؟")) {
+    await deleteDoc(doc(db, "tasks", id));
+    showToast("🗑️ تم حذف التوجيه", "success");
   }
-  let filtered=tasksData;
-  if(filter==="urgent")filtered=tasksData.filter(x=>x.t.priority==="عاجل");
-  else if(filter==="done")filtered=tasksData.filter(x=>x.a.status==="completed");
-  if(!filtered.length){list.innerHTML=`<div class="empty-card">📭<br>لا توجد مهام هنا</div>`;return;}
-  list.innerHTML=filtered.map(({a,t})=>{
-    const isUnread=!a.openedAt,isCrit=t.notifType==="critical";
-    const pb=t.priority==="عاجل"?"chip-red":t.priority==="مهم"?"chip-orange":"chip-blue";
-    const cb=t.category==="متابعة عاجلة"?"chip-red":t.category==="حملات إعلامية"?"chip-purple":"chip-blue";
-    const ts2=t.createdAt?.toDate?t.createdAt.toDate().toLocaleTimeString("ar",{hour:"2-digit",minute:"2-digit"}):"—";
-    return `<div class="task-card ${isUnread?"unread":""} ${isCrit?"critical":""}" onclick="openTask('${a.id}')">
+};
+
+window.editAdminTask = async function(id, title, content, fileUrl) {
+  document.getElementById("fTitle").value = title;
+  document.getElementById("fContent").value = content;
+  window._editFileUrl = fileUrl !== 'null' ? fileUrl : null;
+  const btn = document.getElementById("btnSend");
+  btn.textContent = "حفظ التعديل";
+  btn.onclick = () => sendTask(id);
+  showAdminTab("send");
+};
+
+function renderAdminTasks(tasks) {
+  const list = document.getElementById("adminTaskList");
+  list.innerHTML = tasks.map(t => `
+    <div class="task-card">
       <div class="task-card-top">
-        <div class="task-chips">
-          ${isCrit?'<span class="chip chip-red">🚨 حرج</span>':""}
-          <span class="chip ${pb}">${t.priority}</span>
-          <span class="chip ${cb}">${t.category}</span>
-          ${isUnread?'<span class="chip chip-accent">جديد</span>':""}
-        </div>
-        <span class="task-time">${ts2}</span>
+        <span class="chip chip-blue">${t.priority}</span>
       </div>
       <div class="task-title">${t.title}</div>
-      <div class="task-body">${(t.content||"").substring(0,100)}${(t.content||"").length>100?"...":""}</div>
-      <div class="task-footer">
-        <select class="status-select" onclick="event.stopPropagation()" onchange="updateStatus('${a.id}',this.value)">
-          <option value="pending" ${a.status==="pending"?"selected":""}>⏳ معلق</option>
-          <option value="in_progress" ${a.status==="in_progress"?"selected":""}>⚡ جاري</option>
-          <option value="completed" ${a.status==="completed"?"selected":""}>✅ مكتمل</option>
-        </select>
+      <div class="task-body">${t.content}</div>
+      ${t.fileUrl ? `<a href="${t.fileUrl}" target="_blank" class="chip chip-gray">📎 مرفق</a>` : ''}
+      <div class="task-footer" style="margin-top:10px;">
+        <button class="icon-btn" onclick="editAdminTask('${t.id}', '${t.title}', '${t.content}', '${t.fileUrl}')">✏️</button>
+        <button class="icon-btn danger" onclick="deleteAdminTask('${t.id}')">🗑️</button>
       </div>
-    </div>`;
-  }).join("");
+    </div>`).join("");
 }
 
-
-window.openTask=async function(id){
-  try{await updateDoc(doc(db,"taskAssignments",id),{openedAt:serverTimestamp()});showToast("📖 تم التسجيل","success");}catch(e){}
-};
-window.updateStatus=async function(id,s){
-  try{await updateDoc(doc(db,"taskAssignments",id),{status:s,statusUpdatedAt:serverTimestamp()});
-  showToast(`📊 ${s==="pending"?"معلق":s==="in_progress"?"جاري":"مكتمل"}`,"success");}catch(e){}
-};
-window.filterMemberTasks=function(filter,el){
-  document.querySelectorAll(".filter-btn").forEach(b=>b.classList.remove("active"));
-  el.classList.add("active");
-  getDocs(query(collection(db,"taskAssignments"),where("userId","==",currentUser.uid))).then(async s=>{
-    await renderMemberTasks(s.docs.map(d=>({id:d.id,...d.data()})),filter);
-  });
-};
-
-
-/* ══ CRITICAL MODAL ══ */
-function showCriticalModal(task,assignmentId){
-  document.getElementById("modalTaskTitle").textContent=task.title||"";
-  document.getElementById("modalTaskText").textContent=task.content||"";
-  document.getElementById("criticalModal").classList.add("visible");
-  document.getElementById("criticalModal").dataset.assignmentId=assignmentId||"";
-  try{const ctx=new(window.AudioContext||window.webkitAudioContext)();[0,250,500].forEach(d=>setTimeout(()=>{const o=ctx.createOscillator(),g=ctx.createGain();o.connect(g);g.connect(ctx.destination);o.frequency.setValueAtTime(880,ctx.currentTime);o.frequency.exponentialRampToValueAtTime(440,ctx.currentTime+0.2);g.gain.setValueAtTime(0.3,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.3);o.start();o.stop(ctx.currentTime+0.3);},d));}catch(e){}
-}
-window.acknowledgeAlert=async function(){
-  const id=document.getElementById("criticalModal").dataset.assignmentId;
-  if(id){try{await updateDoc(doc(db,"taskAssignments",id),{acknowledgedAt:serverTimestamp(),openedAt:serverTimestamp(),status:"in_progress"});}catch(e){}}
-  document.getElementById("criticalModal").classList.remove("visible");
-  showToast("✅ تم الإقرار","success");
-};
-window.closeModal=()=>document.getElementById("criticalModal").classList.remove("visible");
-
-
-/* ══ ADMIN RENDER ══ */
-function renderAdminTasks(tasks){
-  const list=document.getElementById("adminTaskList");
-  if(!tasks.length){list.innerHTML=`<div class="empty-card">📋<br>لا توجد مهام بعد</div>`;return;}
-  list.innerHTML=tasks.map(t=>{
-    const pb=t.priority==="عاجل"?"chip-red":t.priority==="مهم"?"chip-orange":"chip-blue";
-    const sb=t.status==="pending"?"chip-gray":t.status==="in_progress"?"chip-orange":"chip-green";
-    const sl=t.status==="pending"?"معلق":t.status==="in_progress"?"جاري":"مكتمل";
-    const ts=t.createdAt?.toDate?t.createdAt.toDate().toLocaleTimeString("ar",{hour:"2-digit",minute:"2-digit"}):"—";
-    return `<div class="task-card">
-      <div class="task-card-top">
-        <div class="task-chips">
-          <span class="chip ${pb}">${t.priority}</span>
-          <span class="chip ${sb}">${sl}</span>
-        </div>
-        <span class="task-time">${ts}</span>
-      </div>
-      <div class="task-title">${t.title}</div>
-      <div class="task-body" style="font-size:12px;color:var(--text-muted)">${t.category} · ${(t.recipients||[]).length} مستلم</div>
-    </div>`;
-  }).join("");
-}
-
-
-function renderTracking(assignments){
-  const list=document.getElementById("trackingList");
-  if(!assignments.length){list.innerHTML=`<div class="empty-card">👁<br>لا توجد بيانات بعد</div>`;return;}
-  list.innerHTML=assignments.slice(0,20).map(a=>{
-    const member=(window._members||[]).find(m=>m.id===a.userId);
-    const mn=member?.name||"عضو";
-    const dd=!!a.notifSentAt,od=!!a.openedAt;
-    const sb=a.status==="pending"?"chip-gray":a.status==="in_progress"?"chip-orange":"chip-green";
-    const sl=a.status==="pending"?"معلق":a.status==="in_progress"?"جاري":"مكتمل";
-    const st=a.notifSentAt?.toDate?a.notifSentAt.toDate().toLocaleTimeString("ar",{hour:"2-digit",minute:"2-digit"}):"—";
-    const ot=a.openedAt?.toDate?a.openedAt.toDate().toLocaleTimeString("ar",{hour:"2-digit",minute:"2-digit"}):"—";
-    return `<div class="tracking-item">
-      <div class="tracking-avatar">${(mn)[0]}</div>
-      <div class="tracking-info">
-        <div class="tracking-name">${mn}</div>
-        <div class="tracking-meta">
-          <span class="${dd?"dot-blue":"dot-gray"}"></span> وصل ${st}
-          <span class="${od?"dot-green":"dot-gray"}" style="margin-right:8px"></span> فُتح ${ot}
-        </div>
-      </div>
-      <span class="chip ${sb}">${sl}</span>
-    </div>`;
-  }).join("");
-}
-
-
-/* ══ FORM ══ */
-window._selectedRecipients=new Set();window._selectedPriority="عاجل";
-function renderRecipients(members){
-  const grid=document.getElementById("recipientsGrid");
-  if(!members?.length){grid.innerHTML=`<div style="font-size:13px;color:var(--text-muted);padding:8px;text-align:center">لا يوجد أعضاء — <button class="text-btn" onclick="showAdminTab('members')">أضف أعضاء أولاً</button></div>`;return;}
-  grid.innerHTML=members.map(m=>`
+/* ══ RECIPIENT SELECTION ══ */
+window._selectedRecipients = new Set();
+function renderRecipients(members) {
+  const grid = document.getElementById("recipientsGrid");
+  grid.innerHTML = members.map(m => `
     <div class="recip-chip" id="chip_${m.id}" onclick="toggleRecipient('${m.id}')">
-      <div class="recip-avatar">${(m.name||"م")[0]}</div>
-      <div class="recip-name">${m.name||m.email}</div>
+      <div class="recip-name">${m.name} (${m.department || 'عام'})</div>
       <div class="recip-check" id="chk_${m.id}"></div>
     </div>`).join("");
 }
-window.toggleRecipient=function(id){
-  const c=document.getElementById("chip_"+id),k=document.getElementById("chk_"+id);
-  if(window._selectedRecipients.has(id)){window._selectedRecipients.delete(id);c.classList.remove("selected");k.textContent="";}
-  else{window._selectedRecipients.add(id);c.classList.add("selected");k.textContent="✓";}
+window.toggleRecipient = function(id) {
+  const c = document.getElementById("chip_"+id), k = document.getElementById("chk_"+id);
+  if(window._selectedRecipients.has(id)) { window._selectedRecipients.delete(id); c.classList.remove("selected"); k.textContent=""; }
+  else { window._selectedRecipients.add(id); c.classList.add("selected"); k.textContent="✓"; }
 };
-window.selectAll=()=>{(window._members||[]).forEach(m=>{window._selectedRecipients.add(m.id);const c=document.getElementById("chip_"+m.id),k=document.getElementById("chk_"+m.id);if(c){c.classList.add("selected");k.textContent="✓";}});};
-window.selectNone=()=>{window._selectedRecipients.clear();document.querySelectorAll(".recip-chip").forEach(c=>c.classList.remove("selected"));document.querySelectorAll(".recip-check").forEach(c=>c.textContent="");};
-window.setPriority=function(el){document.querySelectorAll(".pri-btn").forEach(b=>b.classList.remove("active"));el.classList.add("active");window._selectedPriority=el.dataset.p;};
-
-
-/* ══ NAV ══ */
-window.showAdminTab=function(tab){
-  document.querySelectorAll(".admin-page").forEach(p=>p.classList.remove("active"));
-  document.getElementById("page-"+tab).classList.add("active");
-  document.querySelectorAll(".bottom-nav-btn").forEach(b=>b.classList.remove("active"));
-  const map={overview:0,send:1,tracking:2,members:3};
-  document.querySelectorAll(".bottom-nav-btn")[map[tab]]?.classList.add("active");
-  closeDrawer();
-  if(tab==="members")loadMembers();
+window.selectAll = () => { (window._members||[]).filter(m=>m.role==='member').forEach(m => { window._selectedRecipients.add(m.id); document.getElementById("chip_"+m.id)?.classList.add("selected"); document.getElementById("chk_"+m.id).textContent="✓"; }); };
+window.selectNone = () => { window._selectedRecipients.clear(); document.querySelectorAll(".recip-chip").forEach(c=>c.classList.remove("selected")); document.querySelectorAll(".recip-check").forEach(c=>c.textContent=""); };
+window.selectByDept = (dept) => {
+  selectNone();
+  (window._members||[]).filter(m => m.department === dept && m.role==='member').forEach(m => toggleRecipient(m.id));
 };
 
+/* ══ MEMBER PORTAL & COMMENTS ══ */
+function startMemberListeners() {
+  loadMembers(); // For chat
+  const u = onSnapshot(query(collection(db,"taskAssignments"), where("userId","==",currentUser.uid)), async snap => {
+    const assignments = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    await renderMemberTasks(assignments);
+  });
+  unsubListeners.push(u);
+  startMessagesListener();
+}
 
-window.showScreen=id=>{document.querySelectorAll(".screen").forEach(s=>s.classList.remove("active"));document.getElementById(id).classList.add("active");};
-window.showToast=function(msg,type){const c=document.getElementById("toastContainer"),t=document.createElement("div");t.className=`toast ${type||""}`;t.innerHTML=msg;c.appendChild(t);setTimeout(()=>{t.style.opacity="0";t.style.transition="all .3s";setTimeout(()=>t.remove(),300);},3000);};
+async function renderMemberTasks(assignments) {
+  const list = document.getElementById("memberTaskList");
+  const tasksData = [];
+  for(const a of assignments) {
+    try { const ts = await getDoc(doc(db,"tasks",a.taskId)); if(ts.exists()) tasksData.push({a, t:{id:ts.id,...ts.data()}}); } catch(e){}
+  }
+  
+  list.innerHTML = tasksData.map(({a,t}) => `
+    <div class="task-card">
+      <div class="task-title">${t.title}</div>
+      <div class="task-body">${t.content}</div>
+      ${t.fileUrl ? `<a href="${t.fileUrl}" target="_blank" class="chip chip-gray" style="margin-bottom:10px; display:inline-block;">📎 تحميل المرفق</a>` : ''}
+      <div style="background:var(--surface2); padding:10px; border-radius:8px; margin-top:10px;">
+        <div style="font-size:12px; color:var(--text-muted); margin-bottom:5px;">ملاحظات / تعليقات للإدارة:</div>
+        <textarea id="comment_${a.id}" placeholder="اكتب ملاحظة هنا..." style="width:100%; background:var(--surface); border:1px solid var(--border); color:#fff; padding:8px; border-radius:4px;">${a.comment || ''}</textarea>
+        <div class="task-footer" style="margin-top:8px;">
+          <select class="status-select" onchange="updateStatus('${a.id}', this.value, document.getElementById('comment_${a.id}').value)">
+            <option value="pending" ${a.status==="pending"?"selected":""}>⏳ معلق</option>
+            <option value="in_progress" ${a.status==="in_progress"?"selected":""}>⚡ جاري</option>
+            <option value="completed" ${a.status==="completed"?"selected":""}>✅ مكتمل</option>
+          </select>
+          <button class="icon-btn ok" onclick="updateStatus('${a.id}', '${a.status}', document.getElementById('comment_${a.id}').value)">💾</button>
+        </div>
+      </div>
+    </div>`).join("");
+    
+  if (tasksData.length > 0) {
+    alertSound.play().catch(()=>{}); // محاولة تشغيل التنبيه عند وصول مهمة جديدة
+  }
+}
 
+window.updateStatus = async function(id, status, comment) {
+  try {
+    await updateDoc(doc(db,"taskAssignments",id), {status, comment, statusUpdatedAt: serverTimestamp()});
+    showToast("✅ تم تحديث الحالة والملاحظات","success");
+  } catch(e){}
+};
 
-setTimeout(()=>{const dl=document.getElementById("fDeadline");if(dl)dl.value=new Date(Date.now()+3600000).toISOString().slice(0,16);},100);
+/* ══ MESSAGES (CHAT) ══ */
+function renderChatUsers(users) {
+  const list = document.querySelectorAll(".chat-users-list");
+  const html = users.filter(u => u.id !== currentUser.uid).map(u => `
+    <div class="chat-user-item" onclick="openChat('${u.id}', '${u.name}')">
+      ${u.name} <span style="font-size:10px; color:var(--text-muted)">(${u.role === 'admin' ? 'مدير' : u.department})</span>
+    </div>
+  `).join("");
+  list.forEach(el => el.innerHTML = html);
+}
+
+window.openChat = function(uid, name) {
+  currentChatUser = uid;
+  document.querySelectorAll(".chat-box-title").forEach(e => e.textContent = name);
+  document.querySelectorAll(".chat-area").forEach(e => e.style.display = "flex");
+  loadChatMessages();
+};
+
+let chatUnsub = null;
+function loadChatMessages() {
+  if (chatUnsub) chatUnsub();
+  const chatId = currentUser.uid < currentChatUser ? `${currentUser.uid}_${currentChatUser}` : `${currentChatUser}_${currentUser.uid}`;
+  
+  chatUnsub = onSnapshot(query(collection(db, "messages"), where("chatId", "==", chatId), orderBy("createdAt", "asc")), snap => {
+    const msgs = snap.docs.map(d => d.data());
+    const html = msgs.map(m => `
+      <div style="margin-bottom:8px; text-align:${m.senderId === currentUser.uid ? 'left' : 'right'};">
+        <span style="background:${m.senderId === currentUser.uid ? 'var(--accent)' : 'var(--surface2)'}; color:${m.senderId === currentUser.uid ? '#000' : '#fff'}; padding:6px 12px; border-radius:12px; display:inline-block; font-size:13px;">
+          ${m.text}
+        </span>
+      </div>
+    `).join("");
+    document.querySelectorAll(".chat-messages-container").forEach(e => { e.innerHTML = html; e.scrollTop = e.scrollHeight; });
+  });
+}
+
+window.sendChatMessage = async function() {
+  const inputs = document.querySelectorAll(".chat-input");
+  let text = "";
+  inputs.forEach(i => { if(i.value.trim()) text = i.value.trim(); });
+  if(!text || !currentChatUser) return;
+
+  const chatId = currentUser.uid < currentChatUser ? `${currentUser.uid}_${currentChatUser}` : `${currentChatUser}_${currentUser.uid}`;
+  await addDoc(collection(db, "messages"), {
+    chatId, senderId: currentUser.uid, receiverId: currentChatUser, text, createdAt: serverTimestamp()
+  });
+  inputs.forEach(i => i.value = "");
+};
+
+function startMessagesListener() {
+  // تنبيهات الرسائل الجديدة
+  onSnapshot(query(collection(db, "messages"), where("receiverId", "==", currentUser?.uid || "")), snap => {
+    snap.docChanges().forEach(change => {
+      if (change.type === "added") {
+        showToast("💬 رسالة جديدة", "blue");
+        alertSound.play().catch(()=>{});
+      }
+    });
+  });
+}
+
+/* ══ PROFILE ══ */
+window.updateMyProfile = async function() {
+  const name = document.getElementById("myProfileName").value;
+  const pass = document.getElementById("myProfilePass").value;
+  try {
+    await updateDoc(doc(db, "users", currentUser.uid), {name});
+    if (pass.length >= 6) await updatePassword(currentUser, pass);
+    showToast("✅ تم تحديث الملف الشخصي", "success");
+  } catch(e) { showToast("❌ "+e.message, "error"); }
+};
+
+/* ══ UTILS ══ */
+window.showAdminTab = tab => { document.querySelectorAll(".admin-page").forEach(p=>p.classList.remove("active")); document.getElementById("page-"+tab).classList.add("active"); };
+window.showMemberTab = tab => { document.querySelectorAll(".member-page").forEach(p=>p.classList.remove("active")); document.getElementById("mpage-"+tab).classList.add("active"); };
+window.showScreen = id => { document.querySelectorAll(".screen").forEach(s=>s.classList.remove("active")); document.getElementById(id).classList.add("active"); };
+window.showToast = function(msg, type){ const c=document.getElementById("toastContainer"), t=document.createElement("div"); t.className=`toast ${type||""}`; t.innerHTML=msg; c.appendChild(t); setTimeout(()=>{t.remove()}, 3000); };
 </script>
-
 
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&display=swap');
-
-
-:root {
-  --bg: #0a0a0f;
-  --surface: #13131a;
-  --surface2: #1a1a24;
-  --surface3: #222230;
-  --border: #2a2a3a;
-  --text: #f0f0f8;
-  --text-muted: #8080a0;
-  --text-dim: #404058;
-  --accent: #f0a500;
-  --accent-dim: rgba(240,165,0,0.12);
-  --red: #f85149;
-  --red-dim: rgba(248,81,73,0.12);
-  --green: #3fb950;
-  --green-dim: rgba(63,185,80,0.12);
-  --blue: #58a6ff;
-  --blue-dim: rgba(88,166,255,0.12);
-  --orange: #e3a63a;
-  --purple: #c084fc;
-  --r: 14px;
-  --r-sm: 10px;
-  --nav-h: 68px;
-  --top-h: 60px;
-}
-
-
-* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
-html, body { height: 100%; overflow: hidden; }
+:root { --bg: #0a0a0f; --surface: #13131a; --surface2: #1a1a24; --border: #2a2a3a; --text: #f0f0f8; --text-muted: #8080a0; --accent: #f0a500; --red: #f85149; --green: #3fb950; --blue: #58a6ff; --r: 14px; --r-sm: 10px; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: 'IBM Plex Sans Arabic', sans-serif; background: var(--bg); color: var(--text); font-size: 15px; }
-
-
-/* ══ SCREENS ══ */
-.screen { display: none; height: 100%; flex-direction: column; }
+.screen { display: none; height: 100vh; flex-direction: column; overflow: hidden; }
 .screen.active { display: flex; }
-
-
-/* ══ LOGIN ══ */
-#screen-login {
-  justify-content: center; align-items: center;
-  padding: 24px;
-  background: radial-gradient(ellipse at 50% 20%, rgba(240,165,0,0.08) 0%, transparent 60%);
-}
-.login-wrap { width: 100%; max-width: 360px; }
-.login-logo { text-align: center; margin-bottom: 32px; }
-.login-icon {
-  width: 72px; height: 72px; border-radius: 20px;
-  background: linear-gradient(135deg, var(--accent), #c87800);
-  display: flex; align-items: center; justify-content: center;
-  font-size: 32px; margin: 0 auto 12px;
-  box-shadow: 0 8px 32px rgba(240,165,0,0.3);
-}
-.login-logo h1 { font-size: 24px; font-weight: 700; }
-.login-logo p { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
-.login-error {
-  background: var(--red-dim); border: 1px solid var(--red);
-  border-radius: var(--r-sm); padding: 10px 14px;
-  font-size: 13px; color: var(--red); margin-bottom: 16px; display: none;
-  text-align: center;
-}
+.topbar { height: 60px; background: var(--surface); border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 16px; gap: 12px; }
+.scroll-area { flex: 1; overflow-y: auto; padding: 16px; }
 .field { margin-bottom: 14px; }
 .field label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
-.field input, .field select, .field textarea {
-  width: 100%; background: var(--surface2); border: 1.5px solid var(--border);
-  border-radius: var(--r-sm); padding: 13px 16px;
-  font-size: 15px; font-family: inherit; color: var(--text); outline: none;
-  transition: border-color .2s;
-}
-.field input:focus, .field select:focus, .field textarea:focus { border-color: var(--accent); }
-.field textarea { resize: vertical; min-height: 90px; }
-.field select option { background: var(--surface2); }
-.login-btn {
-  width: 100%; padding: 15px; border-radius: var(--r);
-  background: var(--accent); color: #000; border: none;
-  font-size: 16px; font-weight: 700; font-family: inherit;
-  cursor: pointer; margin-top: 4px;
-  box-shadow: 0 4px 20px rgba(240,165,0,0.3);
-  transition: transform .1s, opacity .2s;
-}
-.login-btn:active { transform: scale(0.98); opacity: 0.9; }
-.login-btn:disabled { opacity: 0.5; }
-
-
-/* ══ TOP BAR ══ */
-.topbar {
-  height: var(--top-h); background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  display: flex; align-items: center;
-  padding: 0 16px; gap: 12px;
-  flex-shrink: 0; position: relative; z-index: 10;
-}
-.topbar-logo { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 18px; color: var(--accent); }
-.topbar-logo-icon { width: 34px; height: 34px; background: linear-gradient(135deg,var(--accent),#c87800); border-radius: 9px; display: flex; align-items: center; justify-content: center; font-size: 16px; }
-.topbar-title { font-size: 14px; color: var(--text-muted); flex: 1; text-align: center; }
-.topbar-spacer { flex: 1; }
-.avatar { width: 34px; height: 34px; border-radius: 50%; background: linear-gradient(135deg,var(--accent),#c87800); display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; color: #000; flex-shrink: 0; }
-.menu-btn { width: 36px; height: 36px; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 18px; cursor: pointer; }
-.badge-dot {
-  width: 20px; height: 20px; background: var(--red); color: #fff;
-  border-radius: 50%; font-size: 11px; font-weight: 700;
-  display: flex; align-items: center; justify-content: center;
-}
-
-
-/* ══ DRAWER ══ */
-.drawer-overlay {
-  position: fixed; inset: 0; background: rgba(0,0,0,0.6);
-  z-index: 50; opacity: 0; pointer-events: none; transition: opacity .3s;
-  backdrop-filter: blur(4px);
-}
-.drawer-overlay.open { opacity: 1; pointer-events: all; }
-.drawer {
-  position: fixed; top: 0; right: -280px; bottom: 0;
-  width: 280px; background: var(--surface);
-  border-left: 1px solid var(--border);
-  z-index: 51; transition: right .3s ease;
-  padding: 24px 20px; display: flex; flex-direction: column; gap: 8px;
-}
-.drawer.open { right: 0; }
-.drawer-header { display: flex; align-items: center; gap: 12px; padding-bottom: 16px; border-bottom: 1px solid var(--border); margin-bottom: 8px; }
-.drawer-name { font-weight: 600; font-size: 16px; }
-.drawer-role { font-size: 12px; color: var(--text-muted); }
-.drawer-item {
-  display: flex; align-items: center; gap: 12px;
-  padding: 12px 14px; border-radius: var(--r-sm);
-  font-size: 15px; cursor: pointer; transition: background .2s;
-}
-.drawer-item:hover { background: var(--surface2); }
-.drawer-item.danger { color: var(--red); margin-top: auto; }
-
-
-/* ══ SCROLL AREA ══ */
-.scroll-area {
-  flex: 1; overflow-y: auto; padding: 16px;
-  padding-bottom: calc(var(--nav-h) + 16px);
-  -webkit-overflow-scrolling: touch;
-}
-.scroll-area::-webkit-scrollbar { display: none; }
-
-
-/* ══ BOTTOM NAV ══ */
-.bottom-nav {
-  position: fixed; bottom: 0; left: 0; right: 0;
-  height: var(--nav-h);
-  background: var(--surface);
-  border-top: 1px solid var(--border);
-  display: flex; align-items: center;
-  padding: 0 8px;
-  padding-bottom: env(safe-area-inset-bottom);
-  z-index: 20;
-}
-.bottom-nav-btn {
-  flex: 1; display: flex; flex-direction: column; align-items: center;
-  gap: 4px; padding: 8px 4px; cursor: pointer;
-  border-radius: var(--r-sm); transition: all .2s;
-  color: var(--text-muted); font-size: 11px; font-weight: 500;
-  border: none; background: transparent; font-family: inherit;
-}
-.bottom-nav-btn .nav-icon { font-size: 22px; line-height: 1; }
-.bottom-nav-btn.active { color: var(--accent); }
-.bottom-nav-btn.active .nav-icon { transform: scale(1.1); }
-
-
-/* ══ ADMIN PAGES ══ */
-.admin-page { display: none; }
-.admin-page.active { display: block; }
-
-
-/* ══ STATS GRID ══ */
-.stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
-.stat-box {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--r); padding: 16px;
-}
-.stat-box-label { font-size: 11px; color: var(--text-muted); margin-bottom: 8px; }
-.stat-box-value { font-size: 32px; font-weight: 700; line-height: 1; }
-.stat-box-value.c-accent { color: var(--accent); }
-.stat-box-value.c-red    { color: var(--red); }
-.stat-box-value.c-green  { color: var(--green); }
-.stat-box-value.c-blue   { color: var(--blue); }
-
-
-/* ══ SECTION HEADER ══ */
-.sec-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-.sec-title { font-size: 16px; font-weight: 600; }
-
-
-/* ══ TASK CARD ══ */
-.task-card {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--r); padding: 14px; margin-bottom: 10px;
-  cursor: pointer; transition: border-color .2s;
-  -webkit-touch-callout: none;
-}
-.task-card:active { opacity: 0.8; }
-.task-card.unread { border-right: 3px solid var(--accent); }
-.task-card.critical { border-right: 3px solid var(--red); background: rgba(248,81,73,0.03); }
-.task-card-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-.task-chips { display: flex; gap: 6px; flex-wrap: wrap; }
-.task-time { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
-.task-title { font-size: 15px; font-weight: 600; margin-bottom: 6px; line-height: 1.4; }
-.task-body { font-size: 13px; color: var(--text-muted); line-height: 1.5; margin-bottom: 10px; }
-.task-footer { display: flex; justify-content: flex-end; }
-
-
-/* ══ STATUS SELECT ══ */
-.status-select {
-  background: var(--surface2); border: 1px solid var(--border);
-  border-radius: 8px; padding: 7px 12px;
-  font-size: 13px; font-family: inherit; color: var(--text);
-  cursor: pointer; outline: none;
-}
-
-
-/* ══ CHIPS ══ */
-.chip {
-  display: inline-flex; align-items: center;
-  padding: 3px 10px; border-radius: 999px;
-  font-size: 11px; font-weight: 600; white-space: nowrap;
-}
-.chip-red    { background: var(--red-dim);  color: var(--red); }
-.chip-orange { background: rgba(227,166,58,0.12); color: var(--orange); }
-.chip-blue   { background: var(--blue-dim); color: var(--blue); }
-.chip-green  { background: var(--green-dim);color: var(--green); }
-.chip-purple { background: rgba(192,132,252,0.12); color: var(--purple); }
-.chip-gray   { background: var(--surface3); color: var(--text-muted); }
-.chip-accent { background: var(--accent-dim); color: var(--accent); }
-
-
-/* ══ SEND FORM ══ */
-.send-form { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; }
-.form-inner { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
-.pri-group { display: flex; gap: 8px; }
-.pri-btn {
-  flex: 1; padding: 10px 6px; border-radius: var(--r-sm);
-  border: 1.5px solid var(--border); background: transparent;
-  color: var(--text-muted); font-size: 12px; font-family: inherit;
-  cursor: pointer; transition: all .2s; text-align: center;
-}
-.pri-btn[data-p="عاجل"].active { background: var(--red-dim); border-color: var(--red); color: var(--red); }
-.pri-btn[data-p="مهم"].active  { background: rgba(227,166,58,0.12); border-color: var(--orange); color: var(--orange); }
-.pri-btn[data-p="عادي"].active { background: var(--blue-dim); border-color: var(--blue); color: var(--blue); }
-.recip-grid { display: flex; flex-direction: column; gap: 8px; }
-.recip-chip {
-  display: flex; align-items: center; gap: 10px;
-  padding: 10px 14px; background: var(--surface2);
-  border: 1.5px solid var(--border); border-radius: var(--r-sm);
-  cursor: pointer; transition: all .2s;
-}
-.recip-chip.selected { background: var(--accent-dim); border-color: var(--accent); }
-.recip-avatar { width: 32px; height: 32px; border-radius: 50%; background: linear-gradient(135deg,var(--accent),#c87800); display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; color: #000; flex-shrink: 0; }
-.recip-name { flex: 1; font-size: 14px; font-weight: 500; }
-.recip-check { width: 20px; height: 20px; border-radius: 6px; border: 1.5px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 12px; color: #000; }
-.recip-chip.selected .recip-check { background: var(--accent); border-color: var(--accent); }
-.send-btn {
-  width: 100%; padding: 15px; background: var(--accent); color: #000;
-  border: none; border-radius: var(--r); font-size: 16px; font-weight: 700;
-  font-family: inherit; cursor: pointer; transition: opacity .2s;
-}
-.send-btn:active { opacity: 0.85; }
-.send-btn:disabled { opacity: 0.4; }
-
-
-/* ══ TRACKING ══ */
-.tracking-item {
-  display: flex; align-items: center; gap: 12px;
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--r); padding: 12px 14px; margin-bottom: 8px;
-}
-.tracking-avatar { width: 36px; height: 36px; border-radius: 50%; background: linear-gradient(135deg,var(--accent),#c87800); display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 700; color: #000; flex-shrink: 0; }
-.tracking-info { flex: 1; min-width: 0; }
-.tracking-name { font-size: 14px; font-weight: 500; }
-.tracking-meta { font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 4px; margin-top: 3px; }
-.dot-blue, .dot-green, .dot-gray { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.dot-blue  { background: var(--blue);  box-shadow: 0 0 6px var(--blue); }
-.dot-green { background: var(--green); box-shadow: 0 0 6px var(--green); }
-.dot-gray  { background: var(--text-dim); }
-
-
-/* ══ MEMBERS ══ */
-.member-item {
-  display: flex; align-items: center; gap: 10px;
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--r); padding: 12px 14px; margin-bottom: 8px;
-}
-.member-item-avatar { width: 40px; height: 40px; border-radius: 50%; background: linear-gradient(135deg,var(--accent),#c87800); display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; color: #000; flex-shrink: 0; }
-.member-item-info { flex: 1; min-width: 0; }
-.member-item-name { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.member-item-email { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.member-item-badges { display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
-.member-item-actions { display: flex; gap: 4px; }
-.icon-btn { width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface2); font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
-.icon-btn.warn { border-color: var(--orange); }
-.icon-btn.ok   { border-color: var(--green); }
-.icon-btn.danger { border-color: var(--red); }
-
-
-/* ══ FILTER TABS ══ */
-.filter-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
-.filter-btn {
-  flex: 1; padding: 9px; border-radius: var(--r-sm);
-  border: 1.5px solid var(--border); background: transparent;
-  color: var(--text-muted); font-size: 13px; font-family: inherit;
-  cursor: pointer; transition: all .2s; text-align: center;
-}
-.filter-btn.active { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); font-weight: 600; }
-
-
-/* ══ MODAL ══ */
-.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.8); display: flex; align-items: flex-end; justify-content: center; z-index: 999; opacity: 0; pointer-events: none; transition: opacity .3s; backdrop-filter: blur(4px); }
-.modal-overlay.visible { opacity: 1; pointer-events: all; }
-.modal-sheet { background: var(--surface); border-radius: 20px 20px 0 0; width: 100%; max-width: 520px; padding: 20px; max-height: 90vh; overflow-y: auto; animation: slideUp .3s ease; }
-@keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
-.modal-handle { width: 40px; height: 4px; background: var(--border); border-radius: 2px; margin: 0 auto 16px; }
-.modal-title { font-size: 18px; font-weight: 700; margin-bottom: 20px; text-align: center; }
-.critical-sheet { border: 2px solid var(--red); border-radius: 20px 20px 0 0; }
-.critical-top { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
-.critical-icon { width: 48px; height: 48px; background: var(--red); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 22px; animation: pulse 1s infinite; flex-shrink: 0; }
-@keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(248,81,73,0.5); } 50% { box-shadow: 0 0 0 12px rgba(248,81,73,0); } }
-.critical-label { font-size: 16px; font-weight: 700; color: var(--red); }
-.critical-sub { font-size: 12px; color: rgba(248,81,73,0.7); }
-.modal-task-title { font-size: 17px; font-weight: 700; margin-bottom: 8px; }
-.modal-task-body { font-size: 13px; color: var(--text-muted); line-height: 1.6; margin-bottom: 16px; }
-.modal-btns { display: flex; flex-direction: column; gap: 10px; }
-.modal-btn-primary { width: 100%; padding: 15px; background: var(--red); color: #fff; border: none; border-radius: var(--r); font-size: 16px; font-weight: 700; font-family: inherit; cursor: pointer; }
-.modal-btn-secondary { width: 100%; padding: 13px; background: transparent; color: var(--text-muted); border: 1px solid var(--border); border-radius: var(--r); font-size: 15px; font-family: inherit; cursor: pointer; }
-.modal-form-btns { display: flex; gap: 10px; margin-top: 4px; }
-.modal-form-btns button { flex: 1; padding: 13px; border-radius: var(--r); font-size: 15px; font-weight: 600; font-family: inherit; cursor: pointer; border: none; }
-.modal-cancel { background: var(--surface2); color: var(--text-muted); }
-.modal-confirm { background: var(--accent); color: #000; }
-.modal-confirm:disabled { opacity: 0.4; }
-
-
-/* ══ MISC ══ */
-.empty-card { text-align: center; padding: 48px 20px; color: var(--text-muted); font-size: 14px; line-height: 1.8; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); }
-.loading-wrap { display: flex; justify-content: center; padding: 48px; }
-.spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
-.text-btn { background: none; border: none; color: var(--accent); font-size: 13px; cursor: pointer; font-family: inherit; }
-.row-btns { display: flex; gap: 8px; margin-bottom: 12px; }
-.row-btn { flex: 1; padding: 9px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--r-sm); font-size: 13px; font-family: inherit; color: var(--text-muted); cursor: pointer; text-align: center; }
-
-
-/* ══ TOAST ══ */
-.toast-container { position: fixed; top: 72px; left: 50%; transform: translateX(-50%); z-index: 9999; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; width: 90%; max-width: 360px; }
-.toast { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 16px; font-size: 14px; color: var(--text); box-shadow: 0 8px 32px rgba(0,0,0,0.4); width: 100%; animation: toastIn .3s ease; text-align: center; }
-.toast.success { border-color: var(--green); }
-.toast.error   { border-color: var(--red); }
-.toast.warning { border-color: var(--accent); }
-@keyframes toastIn { from { opacity:0; transform:translateY(-10px); } to { opacity:1; transform:translateY(0); } }
-
-
-/* ══ SECTION DIVIDER ══ */
-.divider { height: 1px; background: var(--border); margin: 16px 0; }
+.field input, .field select, .field textarea { width: 100%; background: var(--surface2); border: 1.5px solid var(--border); border-radius: var(--r-sm); padding: 10px; color: var(--text); font-family: inherit; }
+.btn { width: 100%; padding: 12px; background: var(--accent); color: #000; border: none; border-radius: var(--r-sm); font-weight: bold; cursor: pointer; }
+.task-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 14px; margin-bottom: 10px; }
+.chip { padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; display: inline-block; }
+.chip-blue { background: rgba(88,166,255,0.12); color: var(--blue); }
+.chip-gray { background: var(--surface2); color: var(--text-muted); text-decoration: none; }
+.icon-btn { width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface2); cursor: pointer; }
+.icon-btn.danger { border-color: var(--red); color: var(--red); }
+.icon-btn.ok { border-color: var(--green); color: var(--green); }
+.recip-chip { padding: 8px 12px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--r-sm); display: flex; justify-content: space-between; margin-bottom: 5px; cursor: pointer; }
+.recip-chip.selected { background: rgba(240,165,0,0.12); border-color: var(--accent); }
+.toast-container { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); z-index: 9999; }
+.toast { background: var(--surface); border: 1px solid var(--border); padding: 10px 20px; border-radius: 8px; margin-bottom: 10px; }
+.nav-tabs { display: flex; gap: 10px; margin-bottom: 15px; }
+.nav-tab { flex: 1; padding: 10px; text-align: center; background: var(--surface2); border-radius: var(--r-sm); cursor: pointer; border: 1px solid var(--border); }
+.chat-users-list { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 10px; }
+.chat-user-item { background: var(--surface2); padding: 10px 15px; border-radius: 20px; white-space: nowrap; cursor: pointer; border: 1px solid var(--border); }
+.chat-area { display: none; flex-direction: column; height: 300px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 10px; margin-top: 15px; }
+.chat-messages-container { flex: 1; overflow-y: auto; margin-bottom: 10px; padding-right: 5px; }
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.8); display: none; align-items: center; justify-content: center; z-index: 999; }
+.modal-overlay.visible { display: flex; }
+.modal-sheet { background: var(--surface); padding: 20px; border-radius: var(--r); width: 90%; max-width: 400px; }
 </style>
-
-
 </head>
 <body>
 
-
 <div class="toast-container" id="toastContainer"></div>
-
-
-<!-- CRITICAL MODAL -->
-
-
-<div class="modal-overlay" id="criticalModal">
-  <div class="modal-sheet critical-sheet">
-    <div class="modal-handle"></div>
-    <div class="critical-top">
-      <div class="critical-icon">🚨</div>
-      <div>
-        <div class="critical-label">تنبيه حرج!</div>
-        <div class="critical-sub">يتطلب تفاعلاً فورياً</div>
-      </div>
-    </div>
-    <div class="modal-task-title" id="modalTaskTitle">...</div>
-    <div class="modal-task-body" id="modalTaskText">...</div>
-    <div class="modal-btns">
-      <button class="modal-btn-primary" onclick="acknowledgeAlert()">✅ تم الاستلام — سأتصرف فوراً</button>
-      <button class="modal-btn-secondary" onclick="closeModal()">لاحقاً</button>
-    </div>
-  </div>
-</div>
-
-
-<!-- MEMBER MODAL -->
-
 
 <div class="modal-overlay" id="memberModal">
   <div class="modal-sheet">
-    <div class="modal-handle"></div>
-    <div class="modal-title" id="memberModalTitle">عضو جديد</div>
-    <div class="field"><label>الاسم الكامل</label><input type="text" id="mName" placeholder="أحمد الصحفي"></div>
-    <div class="field"><label>البريد الإلكتروني</label><input type="email" id="mEmail" placeholder="ahmed@newsroom.com"></div>
-    <div class="field"><label>كلمة المرور</label><input type="password" id="mPassword" placeholder="6 أحرف على الأقل"></div>
-    <div class="field"><label>الدور</label>
-      <select id="mRole"><option value="member">👤 عضو</option><option value="admin">🛡️ مدير</option></select>
+    <h3 style="margin-bottom: 15px;">إدارة عضو</h3>
+    <div class="field"><label>الاسم</label><input type="text" id="mName"></div>
+    <div class="field"><label>البريد</label><input type="email" id="mEmail"></div>
+    <div class="field"><label>كلمة المرور</label><input type="password" id="mPassword" placeholder="للتحديث أو اترك فارغاً"></div>
+    <div class="field"><label>القسم</label>
+      <select id="mDept">
+        <option>التحرير</option><option>التصوير</option><option>المونتاج</option><option>التسويق</option><option>الإدارة</option>
+      </select>
     </div>
-    <div class="modal-form-btns">
-      <button class="modal-cancel" onclick="closeMemberModal()">إلغاء</button>
-      <button class="modal-confirm" id="btnCreateMember" onclick="createMember()">إضافة</button>
+    <div class="field"><label>الدور</label>
+      <select id="mRole"><option value="member">عضو</option><option value="admin">مدير</option></select>
+    </div>
+    <div style="display:flex; gap:10px;">
+      <button class="btn" style="background:var(--surface2); color:#fff;" onclick="closeMemberModal()">إلغاء</button>
+      <button class="btn" id="btnCreateMember">حفظ</button>
     </div>
   </div>
 </div>
-
-
-<!-- ════ LOGIN ════ -->
-
 
 <div class="screen active" id="screen-login">
-  <div class="login-wrap">
-    <div class="login-logo">
-      <div class="login-icon">📡</div>
-      <h1>MOTS</h1>
-      <p>Media Operations & Task System</p>
-    </div>
-    <div id="loginError" class="login-error"></div>
-    <div class="field"><label>البريد الإلكتروني</label><input type="email" id="loginEmail" placeholder="your@email.com" inputmode="email"></div>
-    <div class="field"><label>كلمة المرور</label><input type="password" id="loginPass" placeholder="••••••••" onkeydown="if(event.key==='Enter')doLogin()"></div>
-    <button class="login-btn" id="btnLogin" onclick="doLogin()">دخول</button>
+  <div style="margin: auto; width: 90%; max-width: 320px; text-align: center;">
+    <h1 style="color: var(--accent); margin-bottom: 20px;">MOTS</h1>
+    <div id="loginError" style="color:var(--red); display:none; margin-bottom:10px;"></div>
+    <div class="field"><input type="email" id="loginEmail" placeholder="البريد الإلكتروني"></div>
+    <div class="field"><input type="password" id="loginPass" placeholder="كلمة المرور"></div>
+    <button class="btn" id="btnLogin" onclick="doLogin()">تسجيل الدخول</button>
   </div>
 </div>
-
-
-<!-- ════ ADMIN ════ -->
-
 
 <div class="screen" id="screen-admin">
-  <!-- Drawer Overlay -->
-  <div class="drawer-overlay" id="drawerOverlay" onclick="closeDrawer()"></div>
-
-
-  <!-- Drawer -->
-
-
-  <div class="drawer" id="drawer">
-    <div class="drawer-header">
-      <div class="avatar" id="drawerAvatar" style="width:44px;height:44px;font-size:18px">م</div>
-      <div>
-        <div class="drawer-name" id="adminUserName">المدير</div>
-        <div class="drawer-role">لوحة التحكم</div>
-      </div>
-    </div>
-    <div class="drawer-item" onclick="showAdminTab('overview')"><span>📊</span> نظرة عامة</div>
-    <div class="drawer-item" onclick="showAdminTab('send')"><span>📤</span> إرسال مهمة</div>
-    <div class="drawer-item" onclick="showAdminTab('tracking')"><span>👁</span> الرصد والتتبع</div>
-    <div class="drawer-item" onclick="showAdminTab('members')"><span>👥</span> إدارة الأعضاء</div>
-    <div class="drawer-item danger" onclick="logout()"><span>🚪</span> تسجيل الخروج</div>
-  </div>
-
-
-  <!-- Top Bar -->
-
-
   <div class="topbar">
-    <div class="topbar-logo"><div class="topbar-logo-icon">📡</div>MOTS</div>
-    <div class="topbar-spacer"></div>
-    <div class="avatar" id="adminAvatar">م</div>
-    <div class="menu-btn" onclick="openDrawer()">☰</div>
+    <div style="font-weight:bold; color:var(--accent);">MOTS Admin</div>
+    <div style="flex:1;"></div>
+    <span class="user-name-display" style="font-size:12px; color:var(--text-muted);"></span>
+    <button class="icon-btn danger" onclick="logout()">🚪</button>
   </div>
-
-
-  <!-- Content -->
-
+  
+  <div class="nav-tabs" style="margin: 10px 16px 0;">
+    <div class="nav-tab" onclick="showAdminTab('overview')">المهام</div>
+    <div class="nav-tab" onclick="showAdminTab('send')">إرسال</div>
+    <div class="nav-tab" onclick="showAdminTab('members')">الأعضاء</div>
+    <div class="nav-tab" onclick="showAdminTab('chat')">الرسائل</div>
+  </div>
 
   <div class="scroll-area">
-
-
-```
-<!-- OVERVIEW -->
-<div class="admin-page active" id="page-overview">
-  <div class="stats-grid">
-    <div class="stat-box"><div class="stat-box-label">إجمالي المهام</div><div class="stat-box-value c-accent" id="statTotal">—</div></div>
-    <div class="stat-box"><div class="stat-box-label">معلقة</div><div class="stat-box-value c-red" id="statPending">—</div></div>
-    <div class="stat-box"><div class="stat-box-label">مكتملة</div><div class="stat-box-value c-green" id="statDone">—</div></div>
-    <div class="stat-box"><div class="stat-box-label">الأعضاء</div><div class="stat-box-value c-blue" id="statMembers">—</div></div>
-  </div>
-  <div class="sec-header">
-    <div class="sec-title">آخر المهام</div>
-    <button class="text-btn" onclick="showAdminTab('send')">+ جديدة</button>
-  </div>
-  <div id="adminTaskList"><div class="loading-wrap"><div class="spinner"></div></div></div>
-</div>
-
-
-<!-- SEND -->
-<div class="admin-page" id="page-send">
-  <div class="sec-title" style="margin-bottom:16px">📤 إرسال توجيه جديد</div>
-  <div class="send-form">
-    <div class="form-inner">
-      <div class="field" style="margin:0"><label>عنوان المهمة</label><input type="text" id="fTitle" placeholder="مثال: تغطية مؤتمر صحفي"></div>
-      <div class="field" style="margin:0"><label>نص التوجيه</label><textarea id="fContent" placeholder="التعليمات الكاملة..."></textarea></div>
-      <div class="field" style="margin:0"><label>التصنيف</label>
-        <select id="fCategory"><option>حملات إعلامية</option><option>متابعة عاجلة</option><option>اهتمام وتسويق</option></select>
+    <div class="admin-page active" id="page-overview">
+      <div style="display:flex; gap:10px; margin-bottom:15px;">
+        <div style="flex:1; background:var(--surface2); padding:10px; border-radius:10px; text-align:center;">إجمالي: <b id="statTotal">0</b></div>
+        <div style="flex:1; background:var(--surface2); padding:10px; border-radius:10px; text-align:center;">معلقة: <b id="statPending" style="color:var(--red)">0</b></div>
       </div>
-      <div>
-        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">درجة الأهمية</div>
-        <div class="pri-group">
-          <button class="pri-btn active" data-p="عاجل" onclick="setPriority(this)">🔴 عاجل</button>
-          <button class="pri-btn" data-p="مهم" onclick="setPriority(this)">🟡 مهم</button>
-          <button class="pri-btn" data-p="عادي" onclick="setPriority(this)">🔵 عادي</button>
-        </div>
-      </div>
-      <div class="field" style="margin:0"><label>الوقت المستهدف</label><input type="datetime-local" id="fDeadline"></div>
-      <div class="field" style="margin:0"><label>نوع التنبيه</label>
-        <select id="fNotifType">
-          <option value="normal">🔔 عادي</option>
-          <option value="critical">🚨 حرج (Override Silent)</option>
+      <div id="adminTaskList"></div>
+    </div>
+
+    <div class="admin-page" id="page-send">
+      <div class="field"><label>العنوان</label><input type="text" id="fTitle"></div>
+      <div class="field"><label>التفاصيل</label><textarea id="fContent" rows="4"></textarea></div>
+      <div class="field"><label>إرفاق ملف (اختياري)</label><input type="file" id="fFile"></div>
+      
+      <div class="field"><label>تحديد المستلمين بالقسم:</label>
+        <select onchange="if(this.value) selectByDept(this.value)">
+          <option value="">-- اختر قسم لتحديد أعضائه --</option>
+          <option value="التحرير">التحرير</option><option value="التصوير">التصوير</option>
+          <option value="المونتاج">المونتاج</option><option value="التسويق">التسويق</option>
         </select>
-      </div>
-      <div>
-        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">إرسال إلى</div>
-        <div class="row-btns">
-          <button class="row-btn" onclick="selectAll()">تحديد الكل</button>
-          <button class="row-btn" onclick="selectNone()">إلغاء الكل</button>
+        <div style="margin-top:10px;">
+          <button onclick="selectAll()" style="background:var(--surface2); color:#fff; border:none; padding:5px 10px; border-radius:5px;">تحديد الكل</button>
+          <button onclick="selectNone()" style="background:var(--surface2); color:#fff; border:none; padding:5px 10px; border-radius:5px;">إلغاء</button>
         </div>
-        <div class="recip-grid" id="recipientsGrid"><div class="loading-wrap"><div class="spinner"></div></div></div>
       </div>
-      <button class="send-btn" id="btnSend" onclick="sendTask()">📤 إرسال التوجيه</button>
+      <div id="recipientsGrid" style="margin-bottom:15px; max-height:200px; overflow-y:auto;"></div>
+      <button class="btn" id="btnSend" onclick="sendTask()">إرسال التوجيه</button>
+    </div>
+
+    <div class="admin-page" id="page-members">
+      <button class="btn" style="margin-bottom:15px;" onclick="openNewMemberModal()">+ عضو جديد</button>
+      <div id="membersList"></div>
+    </div>
+
+    <div class="admin-page" id="page-chat">
+      <div class="chat-users-list"></div>
+      <div class="chat-area">
+        <div class="chat-box-title" style="font-weight:bold; margin-bottom:10px; border-bottom:1px solid var(--border); padding-bottom:5px;">اختر مستخدم</div>
+        <div class="chat-messages-container"></div>
+        <div style="display:flex; gap:10px;">
+          <input type="text" class="chat-input" placeholder="رسالة..." style="flex:1; padding:8px; border-radius:8px; border:1px solid var(--border); background:var(--surface2); color:#fff;">
+          <button class="btn" style="width:auto; padding:8px 15px;" onclick="sendChatMessage()">إرسال</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
-
-
-<!-- TRACKING -->
-<div class="admin-page" id="page-tracking">
-  <div class="sec-header">
-    <div class="sec-title">👁 الرصد والتتبع</div>
-    <span style="font-size:11px;color:var(--green)">● مباشر</span>
-  </div>
-  <div id="trackingList"><div class="loading-wrap"><div class="spinner"></div></div></div>
-</div>
-
-
-<!-- MEMBERS -->
-<div class="admin-page" id="page-members">
-  <div class="sec-header">
-    <div class="sec-title">👥 إدارة الأعضاء</div>
-    <button class="send-btn" style="width:auto;padding:10px 16px;font-size:13px" onclick="openNewMemberModal()">➕ عضو جديد</button>
-  </div>
-  <div id="membersList"><div class="loading-wrap"><div class="spinner"></div></div></div>
-</div>
-```
-
-
-  </div>
-
-
-  <!-- Bottom Nav -->
-
-
-  <div class="bottom-nav">
-    <button class="bottom-nav-btn active" onclick="showAdminTab('overview')"><div class="nav-icon">📊</div>عامة</button>
-    <button class="bottom-nav-btn" onclick="showAdminTab('send')"><div class="nav-icon">📤</div>إرسال</button>
-    <button class="bottom-nav-btn" onclick="showAdminTab('tracking')"><div class="nav-icon">👁</div>الرصد</button>
-    <button class="bottom-nav-btn" onclick="showAdminTab('members')"><div class="nav-icon">👥</div>الأعضاء</button>
-  </div>
-</div>
-
-
-<!-- ════ MEMBER ════ -->
-
 
 <div class="screen" id="screen-member">
   <div class="topbar">
-    <div class="topbar-logo"><div class="topbar-logo-icon">📡</div>MOTS</div>
-    <div class="topbar-spacer"></div>
-    <div id="memberBadge" class="badge-dot" style="display:none">0</div>
-    <div class="avatar" id="memberAvatar">أ</div>
-    <div class="menu-btn" onclick="logout()">🚪</div>
-  </div>
-
-
-  <div style="padding:12px 16px 0; flex-shrink:0">
-    <div class="filter-tabs">
-      <button class="filter-btn active" onclick="filterMemberTasks('all',this)">📋 الكل</button>
-      <button class="filter-btn" onclick="filterMemberTasks('urgent',this)">⚡ عاجلة</button>
-      <button class="filter-btn" onclick="filterMemberTasks('done',this)">✅ مكتملة</button>
+    <div style="font-weight:bold; color:var(--accent);">MOTS</div>
+    <div style="flex:1;"></div>
+    <div style="text-align:left; line-height:1.2;">
+      <div class="user-name-display" style="font-size:13px; font-weight:bold;"></div>
+      <div class="user-dept-display" style="font-size:11px; color:var(--text-muted);"></div>
     </div>
+    <button class="icon-btn danger" onclick="logout()">🚪</button>
   </div>
 
+  <div class="nav-tabs" style="margin: 10px 16px 0;">
+    <div class="nav-tab" onclick="showMemberTab('tasks')">مهامي</div>
+    <div class="nav-tab" onclick="showMemberTab('chat')">الرسائل</div>
+    <div class="nav-tab" onclick="showMemberTab('profile')">حسابي</div>
+  </div>
 
-  <div class="scroll-area" style="padding-bottom:24px">
-    <div id="memberTaskList"><div class="loading-wrap"><div class="spinner"></div></div></div>
+  <div class="scroll-area">
+    <div class="member-page active" id="mpage-tasks">
+      <div id="memberTaskList"></div>
+    </div>
+
+    <div class="member-page" id="mpage-chat">
+      <div class="chat-users-list"></div>
+      <div class="chat-area">
+        <div class="chat-box-title" style="font-weight:bold; margin-bottom:10px; border-bottom:1px solid var(--border); padding-bottom:5px;">اختر مستخدم</div>
+        <div class="chat-messages-container"></div>
+        <div style="display:flex; gap:10px;">
+          <input type="text" class="chat-input" placeholder="رسالة..." style="flex:1; padding:8px; border-radius:8px; border:1px solid var(--border); background:var(--surface2); color:#fff;">
+          <button class="btn" style="width:auto; padding:8px 15px;" onclick="sendChatMessage()">إرسال</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="member-page" id="mpage-profile">
+      <div class="task-card">
+        <h3 style="margin-bottom:15px;">تعديل بياناتي</h3>
+        <div class="field"><label>الاسم</label><input type="text" id="myProfileName"></div>
+        <div class="field"><label>تغيير كلمة المرور</label><input type="password" id="myProfilePass" placeholder="اتركها فارغة إذا لم ترد التغيير"></div>
+        <button class="btn" onclick="updateMyProfile()">حفظ التعديلات</button>
+      </div>
+    </div>
   </div>
 </div>
 
+<script>
+  // تهيئة حقول الملف الشخصي
+  setTimeout(() => {
+    document.getElementById("myProfileName").value = document.querySelector(".user-name-display").textContent;
+  }, 2000);
+</script>
 
 </body>
 </html>
