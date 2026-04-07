@@ -34,7 +34,7 @@ const storage = getStorage(app);
 
 let currentUser = null, currentRole = null, unsubListeners = [];
 
-/* ══ AUDIO SYNTHESIS (توليد التنبيه الصوتي) ══ */
+/* ══ AUDIO SYNTHESIS ══ */
 let audioCtx = null;
 function playAlertSound() {
   try {
@@ -43,7 +43,7 @@ function playAlertSound() {
     const oscillator = audioCtx.createOscillator();
     const gainNode = audioCtx.createGain();
     oscillator.type = 'sine';
-    oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // نغمة مرتفعة نسبياً
+    oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
     oscillator.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + 0.2);
     gainNode.gain.setValueAtTime(0.5, audioCtx.currentTime);
     gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
@@ -51,7 +51,7 @@ function playAlertSound() {
     gainNode.connect(audioCtx.destination);
     oscillator.start();
     oscillator.stop(audioCtx.currentTime + 0.3);
-  } catch(e) { console.log("Audio play failed:", e); }
+  } catch(e) {}
 }
 
 /* ══ AUTH ══ */
@@ -72,11 +72,13 @@ onAuthStateChanged(auth, async (user) => {
     } else {
       showScreen("screen-member");
       startMemberListeners();
-      document.getElementById("memberName").textContent = data.name || "عضو";
+      // تحديث بيانات العضو في القائمة الجانبية الجديدة
+      document.getElementById("drawerMemberName").textContent = data.name || "عضو";
+      document.getElementById("drawerMemberDept").textContent = data.department || "عام";
+      document.getElementById("drawerMemberAvatar").textContent = (data.name||"أ")[0];
       document.getElementById("memberAvatar").textContent = (data.name||"أ")[0];
     }
     
-    // لتهيئة الصوت بمجرد تسجيل الدخول
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   } else {
     currentUser=null; currentRole=null; window._userData=null;
@@ -95,7 +97,6 @@ window.doLogin = async function() {
   try {
     await signInWithEmailAndPassword(auth,email,pass);
     showToast("✅ مرحباً!","success");
-    // تهيئة الصوت عند أول تفاعل من المستخدم للسماح بالتشغيل التلقائي لاحقاً
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     if (audioCtx.state === 'suspended') audioCtx.resume();
   } catch(e) {
@@ -106,12 +107,12 @@ window.doLogin = async function() {
 };
 
 window.logout = async function() {
-  document.getElementById("drawerOverlay")?.classList.remove("open");
-  document.getElementById("drawer")?.classList.remove("open");
+  document.querySelectorAll(".drawer-overlay").forEach(e => e.classList.remove("open"));
+  document.querySelectorAll(".drawer").forEach(e => e.classList.remove("open"));
   await signOut(auth);
 };
 
-/* ══ DRAWER ══ */
+/* ══ DRAWERS ══ */
 window.openDrawer = function() {
   document.getElementById("drawer").classList.add("open");
   document.getElementById("drawerOverlay").classList.add("open");
@@ -119,6 +120,16 @@ window.openDrawer = function() {
 window.closeDrawer = function() {
   document.getElementById("drawer").classList.remove("open");
   document.getElementById("drawerOverlay").classList.remove("open");
+};
+
+// القائمة الجانبية الخاصة بالعضو
+window.openMemberDrawer = function() {
+  document.getElementById("memberDrawer").classList.add("open");
+  document.getElementById("memberDrawerOverlay").classList.add("open");
+};
+window.closeMemberDrawer = function() {
+  document.getElementById("memberDrawer").classList.remove("open");
+  document.getElementById("memberDrawerOverlay").classList.remove("open");
 };
 
 /* ══ ADMIN LISTENERS ══ */
@@ -331,7 +342,6 @@ function startMemberListeners(){
     const assignments=snap.docs.map(d=>({id:d.id,...d.data()}));
     await renderMemberTasks(assignments, window._currentFilter || "all");
     
-    // تشغيل التنبيه إذا كانت هناك مهام جديدة (تجاهل التحميل الأول للصفحة)
     if (!isFirstTaskLoad) {
       const hasNewTasks = snap.docChanges().some(change => change.type === 'added');
       if (hasNewTasks) playAlertSound();
@@ -428,7 +438,7 @@ function showCriticalModal(task,assignmentId){
   document.getElementById("modalTaskText").textContent=task.content||"";
   document.getElementById("criticalModal").classList.add("visible");
   document.getElementById("criticalModal").dataset.assignmentId=assignmentId||"";
-  playAlertSound(); // تشغيل التنبيه الصوتي
+  playAlertSound(); 
 }
 
 window.acknowledgeAlert = function() {
@@ -568,6 +578,8 @@ window.openChatWith = function(uid, name) {
   isFirstChatLoad = true;
   
   const chatId = currentUser.uid < uid ? `${currentUser.uid}_${uid}` : `${uid}_${currentUser.uid}`;
+  
+  // اضافة تعقب الأخطاء (Error Handling) للمراسلة
   window._chatUnsub = onSnapshot(query(collection(db, "messages"), where("chatId", "==", chatId), orderBy("createdAt", "asc")), snap => {
     const msgs = snap.docs.map(d => d.data());
     const container = document.getElementById("chatMessages");
@@ -580,27 +592,35 @@ window.openChatWith = function(uid, name) {
     `).join("");
     container.scrollTop = container.scrollHeight;
     
-    // تشغيل التنبيه إذا استلم رسالة جديدة
     if (!isFirstChatLoad) {
       const hasNewMsg = snap.docChanges().some(c => c.type === 'added' && c.doc.data().senderId !== currentUser.uid);
       if (hasNewMsg) playAlertSound();
     }
     isFirstChatLoad = false;
+  }, error => {
+    console.error("Chat Read Error:", error);
+    showToast("❌ غير مصرح لك بقراءة الرسائل (يرجى تعديل قواعد Firebase)", "error");
   });
 };
 
 window.sendChatMessage = async function() {
   const input = document.getElementById("chatInput");
   const text = input.value.trim();
-  if(!text || !window._currentChatUser) return;
+  if(!text) { showToast("⚠️ اكتب رسالة أولاً", "warning"); return; }
+  if(!window._currentChatUser) { showToast("⚠️ لم يتم تحديد مستخدم للمراسلة", "warning"); return; }
 
   const uid = window._currentChatUser;
   const chatId = currentUser.uid < uid ? `${currentUser.uid}_${uid}` : `${uid}_${currentUser.uid}`;
   
-  await addDoc(collection(db, "messages"), {
-    chatId, senderId: currentUser.uid, receiverId: uid, text, createdAt: serverTimestamp()
-  });
-  input.value = "";
+  try {
+    await addDoc(collection(db, "messages"), {
+      chatId, senderId: currentUser.uid, receiverId: uid, text, createdAt: serverTimestamp()
+    });
+    input.value = "";
+  } catch(e) {
+    console.error("Chat Write Error:", e);
+    showToast("❌ فشل الإرسال. تأكد من قواعد الأمان (Firestore Rules)", "error");
+  }
 };
 
 
@@ -748,15 +768,14 @@ window.showToast=function(msg,type){const c=document.getElementById("toastContai
     <div class="drawer-item" onclick="showAdminTab('send')"><span>📤</span> إرسال مهمة</div>
     <div class="drawer-item" onclick="showAdminTab('tracking')"><span>👁</span> الرصد والتتبع</div>
     <div class="drawer-item" onclick="showAdminTab('members')"><span>👥</span> إدارة الأعضاء</div>
-    <div class="drawer-item" onclick="openChatModal()"><span>💬</span> الرسائل الخاصة</div>
-    <div class="drawer-item" onclick="openProfileModal()"><span>⚙️</span> تعديل حسابي</div>
+    <div class="drawer-item" onclick="openChatModal(); closeDrawer()"><span>💬</span> الرسائل الخاصة</div>
+    <div class="drawer-item" onclick="openProfileModal(); closeDrawer()"><span>⚙️</span> تعديل حسابي</div>
     <div class="drawer-item danger" onclick="logout()"><span>🚪</span> تسجيل الخروج</div>
   </div>
 
   <div class="topbar">
     <div class="topbar-logo"><div class="topbar-logo-icon">📡</div>MOTS</div>
     <div class="topbar-spacer"></div>
-    <button class="icon-btn" onclick="openChatModal()" style="border:none; background:transparent; font-size:20px;">💬</button>
     <div class="avatar" id="adminAvatar" onclick="openProfileModal()">م</div>
     <div class="menu-btn" onclick="openDrawer()">☰</div>
   </div>
@@ -853,14 +872,29 @@ window.showToast=function(msg,type){const c=document.getElementById("toastContai
 
 
 <div class="screen" id="screen-member">
+
+  <div class="drawer-overlay" id="memberDrawerOverlay" onclick="closeMemberDrawer()"></div>
+  <div class="drawer" id="memberDrawer">
+    <div class="drawer-header">
+      <div class="avatar" id="drawerMemberAvatar" style="width:44px;height:44px;font-size:18px" onclick="openProfileModal()">أ</div>
+      <div>
+        <div class="drawer-name" id="drawerMemberName">عضو</div>
+        <div class="drawer-role" id="drawerMemberDept">عام</div>
+      </div>
+    </div>
+    <div class="drawer-item" onclick="closeMemberDrawer()"><span>📋</span> المهام الخاصة بي</div>
+    <div class="drawer-item" onclick="openChatModal(); closeMemberDrawer()"><span>💬</span> الرسائل الخاصة</div>
+    <div class="drawer-item" onclick="openProfileModal(); closeMemberDrawer()"><span>⚙️</span> تعديل حسابي</div>
+    <div class="drawer-item danger" onclick="logout()"><span>🚪</span> تسجيل الخروج</div>
+  </div>
+
   <div class="topbar">
     <div class="topbar-logo"><div class="topbar-logo-icon">📡</div>MOTS</div>
     <div style="margin-right:8px; font-size:12px; color:var(--text-muted);">بوابة الأعضاء</div>
     <div class="topbar-spacer"></div>
-    <button class="icon-btn" onclick="openChatModal()" style="border:none; background:transparent; font-size:20px; margin-left:8px;">💬</button>
     <div id="memberBadge" class="badge-dot" style="display:none">0</div>
     <div class="avatar" id="memberAvatar" onclick="openProfileModal()">أ</div>
-    <div class="menu-btn" onclick="logout()" style="font-size: 13px; font-weight: bold; padding: 0 10px; width: auto;">خروج</div>
+    <div class="menu-btn" onclick="openMemberDrawer()">☰</div>
   </div>
 
   <div style="padding:12px 16px 0; flex-shrink:0">
