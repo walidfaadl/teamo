@@ -1,0 +1,920 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MOTS — نظام إدارة التوجيهات الإعلامية</title>
+
+<!-- Firebase SDK -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import {
+  getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged
+} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import {
+  getFirestore, collection, doc, addDoc, updateDoc, getDocs,
+  query, where, orderBy, onSnapshot, serverTimestamp, getDoc
+} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+/* ══════════════════════════════════════
+   FIREBASE CONFIG
+══════════════════════════════════════ */
+const firebaseConfig = {
+  apiKey: "AIzaSyC-CeTBjIWZnUaaNlrdyb3qO-VNsdHGpt4",
+  authDomain: "teams-5365d.firebaseapp.com",
+  projectId: "teams-5365d",
+  storageBucket: "teams-5365d.firebasestorage.app",
+  messagingSenderId: "742941957180",
+  appId: "1:742941957180:web:b30056b3cdf9e6cefcf739"
+};
+
+const app   = initializeApp(firebaseConfig);
+const auth  = getAuth(app);
+const db    = getFirestore(app);
+
+/* ══════════════════════════════════════
+   STATE
+══════════════════════════════════════ */
+let currentUser   = null;
+let currentRole   = null;
+let unsubListeners = [];
+
+/* ══════════════════════════════════════
+   AUTH STATE LISTENER
+══════════════════════════════════════ */
+onAuthStateChanged(auth, async (user) => {
+  if (user) {
+    currentUser = user;
+    const snap = await getDoc(doc(db, "users", user.uid));
+    if (!snap.exists()) { await signOut(auth); return; }
+    const data = snap.data();
+    currentRole = data.role;
+    if (currentRole === "admin") {
+      showScreen("screen-admin");
+      startAdminListeners();
+      setTopbarUser(data.name, "admin");
+    } else {
+      showScreen("screen-member");
+      startMemberListeners();
+      setTopbarUser(data.name, "member");
+    }
+  } else {
+    currentUser = null; currentRole = null;
+    unsubListeners.forEach(u => u());
+    unsubListeners = [];
+    showScreen("screen-login");
+  }
+});
+
+/* ══════════════════════════════════════
+   LOGIN
+══════════════════════════════════════ */
+window.doLogin = async function() {
+  const email = document.getElementById("loginEmail").value.trim();
+  const pass  = document.getElementById("loginPass").value;
+  const err   = document.getElementById("loginError");
+  err.style.display = "none";
+  setLoading("btnLogin", true);
+  try {
+    await signInWithEmailAndPassword(auth, email, pass);
+    showToast("✅ تم الدخول بنجاح", "success");
+  } catch(e) {
+    err.style.display = "block";
+    err.textContent = "البريد الإلكتروني أو كلمة المرور غير صحيحة";
+  }
+  setLoading("btnLogin", false);
+};
+
+window.logout = async function() {
+  await signOut(auth);
+  showToast("👋 تم تسجيل الخروج", "");
+};
+
+/* ══════════════════════════════════════
+   ADMIN: REAL-TIME LISTENERS
+══════════════════════════════════════ */
+function startAdminListeners() {
+  // Real-time tasks
+  const q = query(collection(db, "tasks"), orderBy("createdAt", "desc"));
+  const unsub = onSnapshot(q, (snap) => {
+    const tasks = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    renderAdminTasks(tasks);
+    updateStats(tasks);
+  });
+  unsubListeners.push(unsub);
+
+  // Real-time tracking
+  const q2 = query(collection(db, "taskAssignments"), orderBy("notifSentAt", "desc"));
+  const unsub2 = onSnapshot(q2, (snap) => {
+    const assignments = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    renderTracking(assignments);
+  });
+  unsubListeners.push(unsub2);
+
+  // Load members list
+  loadMembers();
+}
+
+/* ══════════════════════════════════════
+   ADMIN: LOAD MEMBERS
+══════════════════════════════════════ */
+async function loadMembers() {
+  const snap = await getDocs(query(collection(db, "users"), where("role", "==", "member")));
+  const members = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  window._members = members;
+  renderRecipients(members);
+}
+
+/* ══════════════════════════════════════
+   ADMIN: SEND TASK
+══════════════════════════════════════ */
+window.sendTask = async function() {
+  const title      = document.getElementById("fTitle").value.trim();
+  const content    = document.getElementById("fContent").value.trim();
+  const category   = document.getElementById("fCategory").value;
+  const notifType  = document.getElementById("fNotifType").value;
+  const deadline   = document.getElementById("fDeadline").value;
+  const priority   = window._selectedPriority || "عاجل";
+  const recipients = [...(window._selectedRecipients || [])];
+
+  if (!title || !content) { showToast("⚠️ أدخل عنوان ونص المهمة", "warning"); return; }
+  if (recipients.length === 0) { showToast("⚠️ اختر مستلماً واحداً على الأقل", "warning"); return; }
+
+  setLoading("btnSend", true);
+  try {
+    // 1. Save task
+    const taskRef = await addDoc(collection(db, "tasks"), {
+      title, content, category, priority, notifType,
+      recipients,
+      targetDeadline: deadline ? new Date(deadline) : null,
+      createdBy: currentUser.uid,
+      createdAt: serverTimestamp(),
+      status: "pending"
+    });
+
+    // 2. Create assignment per recipient
+    for (const uid of recipients) {
+      await addDoc(collection(db, "taskAssignments"), {
+        taskId: taskRef.id,
+        userId: uid,
+        notifSentAt: serverTimestamp(),
+        notifDeliveredAt: null,
+        openedAt: null,
+        acknowledgedAt: null,
+        status: "pending",
+        statusUpdatedAt: serverTimestamp()
+      });
+    }
+
+    showToast(notifType === "critical"
+      ? "🚨 تم إرسال التنبيه الحرج إلى " + recipients.length + " أعضاء"
+      : "✅ تم إرسال التوجيه إلى " + recipients.length + " أعضاء", "success");
+
+    clearForm();
+    adminTab(null, "overview");
+  } catch(e) {
+    console.error(e);
+    showToast("❌ خطأ في الإرسال: " + e.message, "error");
+  }
+  setLoading("btnSend", false);
+};
+
+/* ══════════════════════════════════════
+   MEMBER: REAL-TIME LISTENERS
+══════════════════════════════════════ */
+function startMemberListeners() {
+  const q = query(
+    collection(db, "taskAssignments"),
+    where("userId", "==", currentUser.uid)
+  );
+  const unsub = onSnapshot(q, async (snap) => {
+    const assignments = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    await renderMemberTasks(assignments);
+    const unread = assignments.filter(a => !a.openedAt).length;
+    document.getElementById("memberBadge").textContent = unread;
+    document.getElementById("memberBadge").style.display = unread > 0 ? "inline" : "none";
+
+    // Show critical alert if any unread critical
+    const criticals = assignments.filter(a => !a.acknowledgedAt);
+    if (criticals.length > 0) {
+      const taskSnap = await getDoc(doc(db, "tasks", criticals[0].taskId));
+      if (taskSnap.exists() && taskSnap.data().notifType === "critical") {
+        showCriticalModal(taskSnap.data(), criticals[0].id);
+      }
+    }
+  });
+  unsubListeners.push(unsub);
+}
+
+/* ══════════════════════════════════════
+   MEMBER: RENDER TASKS
+══════════════════════════════════════ */
+async function renderMemberTasks(assignments, filter = "all") {
+  const list = document.getElementById("memberTaskList");
+  list.innerHTML = `<div class="empty-state"><div class="spinner"></div><div>جاري التحميل...</div></div>`;
+
+  // Fetch task details for each assignment
+  const tasksData = [];
+  for (const a of assignments) {
+    try {
+      const tSnap = await getDoc(doc(db, "tasks", a.taskId));
+      if (tSnap.exists()) {
+        tasksData.push({ assignment: a, task: { id: tSnap.id, ...tSnap.data() } });
+      }
+    } catch(e) {}
+  }
+
+  let filtered = tasksData;
+  if (filter === "urgent") filtered = tasksData.filter(x => x.task.priority === "عاجل");
+  else if (filter === "done") filtered = tasksData.filter(x => x.assignment.status === "completed");
+
+  if (filtered.length === 0) {
+    list.innerHTML = `<div class="empty-state"><div class="icon">📭</div><div>لا توجد مهام في هذه الفئة</div></div>`;
+    return;
+  }
+
+  list.innerHTML = filtered.map(({ assignment: a, task: t }) => {
+    const isUnread  = !a.openedAt;
+    const isCrit    = t.notifType === "critical";
+    const prioBadge = t.priority === "عاجل" ? "badge-red" : t.priority === "مهم" ? "badge-orange" : "badge-blue";
+    const catBadge  = t.category === "متابعة عاجلة" ? "badge-red" : t.category === "حملات إعلامية" ? "badge-purple" : "badge-blue";
+    const status    = a.status || "pending";
+    const timeStr   = t.createdAt?.toDate ? t.createdAt.toDate().toLocaleTimeString("ar",{hour:"2-digit",minute:"2-digit"}) : "—";
+
+    return `<div class="task-card ${isUnread?"unread":""} ${isCrit?"critical":""}" onclick="openTask('${a.id}','${t.id}')">
+      <div class="task-card-header">
+        <div style="flex:1">
+          <div class="task-card-meta">
+            ${isCrit ? '<span class="badge badge-red">🚨 حرج</span>' : ""}
+            <span class="badge ${prioBadge}">${t.priority}</span>
+            <span class="badge ${catBadge}">${t.category}</span>
+            ${isUnread ? '<span class="badge" style="background:rgba(240,165,0,0.15);color:var(--accent)">● جديد</span>' : ""}
+          </div>
+          <div class="task-card-title">${t.title}</div>
+        </div>
+      </div>
+      <div class="task-card-body">${(t.content||"").substring(0,130)}${(t.content||"").length>130?"...":""}</div>
+      <div class="task-card-footer">
+        <span class="ts">⏱ ${timeStr}</span>
+        <select class="task-status-select" onclick="event.stopPropagation()" onchange="updateStatus('${a.id}',this.value)">
+          <option value="pending"     ${status==="pending"?"selected":""}>⏳ معلق</option>
+          <option value="in_progress" ${status==="in_progress"?"selected":""}>⚡ جاري</option>
+          <option value="completed"   ${status==="completed"?"selected":""}>✅ مكتمل</option>
+        </select>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+/* ══════════════════════════════════════
+   MEMBER: OPEN TASK (Read Receipt)
+══════════════════════════════════════ */
+window.openTask = async function(assignmentId, taskId) {
+  try {
+    await updateDoc(doc(db, "taskAssignments", assignmentId), {
+      openedAt: serverTimestamp()
+    });
+    showToast("📖 تم تسجيل قراءة المهمة", "success");
+  } catch(e) { console.error(e); }
+};
+
+/* ══════════════════════════════════════
+   MEMBER: UPDATE STATUS
+══════════════════════════════════════ */
+window.updateStatus = async function(assignmentId, newStatus) {
+  try {
+    await updateDoc(doc(db, "taskAssignments", assignmentId), {
+      status: newStatus,
+      statusUpdatedAt: serverTimestamp()
+    });
+    const label = newStatus==="pending"?"معلق":newStatus==="in_progress"?"جاري التنفيذ":"مكتملة";
+    showToast(`📊 تحديث الحالة: ${label}`, "success");
+  } catch(e) { showToast("❌ خطأ في التحديث", "error"); }
+};
+
+/* ══════════════════════════════════════
+   CRITICAL MODAL
+══════════════════════════════════════ */
+function showCriticalModal(task, assignmentId) {
+  document.getElementById("modalTaskTitle").textContent = task.title;
+  document.getElementById("modalTaskText").textContent  = task.content;
+  document.getElementById("criticalModal").classList.add("visible");
+  document.getElementById("criticalModal").dataset.assignmentId = assignmentId;
+  playCriticalSound();
+}
+
+window.acknowledgeAlert = async function() {
+  const assignmentId = document.getElementById("criticalModal").dataset.assignmentId;
+  if (assignmentId) {
+    try {
+      await updateDoc(doc(db, "taskAssignments", assignmentId), {
+        acknowledgedAt: serverTimestamp(),
+        openedAt: serverTimestamp(),
+        status: "in_progress"
+      });
+    } catch(e) {}
+  }
+  closeModal();
+  showToast("✅ تم الإقرار بالاستلام — تم تحديث لوحة التحكم", "success");
+};
+
+window.closeModal = function() {
+  document.getElementById("criticalModal").classList.remove("visible");
+};
+
+function playCriticalSound() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    [0,250,500].forEach(delay => {
+      setTimeout(() => {
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.connect(g); g.connect(ctx.destination);
+        o.frequency.setValueAtTime(880, ctx.currentTime);
+        o.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.2);
+        g.gain.setValueAtTime(0.3, ctx.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+        o.start(); o.stop(ctx.currentTime + 0.3);
+      }, delay);
+    });
+  } catch(e) {}
+}
+
+/* ══════════════════════════════════════
+   ADMIN: RENDER TASKS TABLE
+══════════════════════════════════════ */
+function renderAdminTasks(tasks) {
+  const tbody = document.getElementById("adminTasksBody");
+  if (!tasks.length) {
+    tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state">لا توجد مهام بعد</div></td></tr>`;
+    return;
+  }
+  tbody.innerHTML = tasks.map((t, i) => {
+    const prioBadge   = t.priority==="عاجل"?"badge-red":t.priority==="مهم"?"badge-orange":"badge-blue";
+    const statusBadge = t.status==="pending"?"badge-gray":t.status==="in_progress"?"badge-orange":"badge-green";
+    const statusLabel = t.status==="pending"?"معلق":t.status==="in_progress"?"جاري":"مكتمل";
+    const catBadge    = t.category==="متابعة عاجلة"?"badge-red":t.category==="حملات إعلامية"?"badge-purple":"badge-blue";
+    const timeStr     = t.createdAt?.toDate ? t.createdAt.toDate().toLocaleTimeString("ar",{hour:"2-digit",minute:"2-digit"}) : "—";
+    const recCount    = (t.recipients||[]).length;
+    return `<tr>
+      <td><span class="ts">#${String(i+1).padStart(2,"0")}</span></td>
+      <td><strong>${t.title}</strong></td>
+      <td><span class="badge ${catBadge}">${t.category}</span></td>
+      <td><span class="badge ${prioBadge}">${t.priority}</span></td>
+      <td style="font-size:12px;color:var(--text-muted)">${recCount} عضو</td>
+      <td><span class="badge ${statusBadge}">${statusLabel}</span></td>
+      <td><span class="ts">${timeStr}</span></td>
+      <td><button class="btn btn-ghost btn-sm" onclick="adminTab(null,'tracking')">رصد</button></td>
+    </tr>`;
+  }).join("");
+}
+
+/* ══════════════════════════════════════
+   ADMIN: STATS
+══════════════════════════════════════ */
+function updateStats(tasks) {
+  document.getElementById("statTotal").textContent   = tasks.length;
+  document.getElementById("statPending").textContent = tasks.filter(t=>t.status==="pending").length;
+  document.getElementById("statDone").textContent    = tasks.filter(t=>t.status==="completed").length;
+}
+
+/* ══════════════════════════════════════
+   ADMIN: TRACKING
+══════════════════════════════════════ */
+function renderTracking(assignments) {
+  const body = document.getElementById("trackingBody");
+  if (!assignments.length) {
+    body.innerHTML = `<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:13px">لا توجد بيانات تتبع بعد</div>`;
+    return;
+  }
+  body.innerHTML = assignments.slice(0,20).map(a => {
+    const deliveredDot = a.notifDeliveredAt ? "delivered" : a.notifSentAt ? "delivered" : "pending";
+    const openedDot    = a.openedAt ? "opened" : "pending";
+    const sBadge       = a.status==="pending"?"badge-gray":a.status==="in_progress"?"badge-orange":"badge-green";
+    const sLabel       = a.status==="pending"?"معلق":a.status==="in_progress"?"جاري":"مكتمل";
+    const sentStr      = a.notifSentAt?.toDate ? a.notifSentAt.toDate().toLocaleTimeString("ar",{hour:"2-digit",minute:"2-digit"}) : "—";
+    const openStr      = a.openedAt?.toDate    ? a.openedAt.toDate().toLocaleTimeString("ar",{hour:"2-digit",minute:"2-digit"})    : "—";
+    return `<div class="member-row">
+      <div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted)">${a.userId.substring(0,12)}...</div>
+      <div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${a.taskId.substring(0,12)}...</div>
+      <div><span class="read-dot ${deliveredDot}"></span><span class="ts">${sentStr}</span></div>
+      <div><span class="read-dot ${openedDot}"></span><span class="ts">${openStr}</span></div>
+      <div><span class="badge ${sBadge}">${sLabel}</span></div>
+    </div>`;
+  }).join("");
+}
+
+/* ══════════════════════════════════════
+   RECIPIENTS RENDER
+══════════════════════════════════════ */
+window._selectedRecipients = new Set();
+window._selectedPriority   = "عاجل";
+
+function renderRecipients(members) {
+  const grid = document.getElementById("recipientsGrid");
+  if (!members || !members.length) {
+    grid.innerHTML = `<div style="font-size:13px;color:var(--text-muted);padding:8px">لا يوجد أعضاء مسجلون بعد.<br>أضف أعضاء من Firebase Authentication أولاً.</div>`;
+    return;
+  }
+  grid.innerHTML = members.map(m => `
+    <div class="recipient-chip" id="chip_${m.id}" onclick="toggleRecipient('${m.id}')">
+      <div class="check" id="chk_${m.id}"></div>
+      <div style="line-height:1.3">
+        <div style="font-weight:500">${m.name||m.email}</div>
+        <div style="font-size:11px;color:var(--text-muted)">${m.email||""}</div>
+      </div>
+    </div>`).join("");
+}
+
+window.toggleRecipient = function(id) {
+  const chip = document.getElementById("chip_"+id);
+  const chk  = document.getElementById("chk_"+id);
+  if (window._selectedRecipients.has(id)) {
+    window._selectedRecipients.delete(id);
+    chip.classList.remove("selected"); chk.textContent = "";
+  } else {
+    window._selectedRecipients.add(id);
+    chip.classList.add("selected"); chk.textContent = "✓";
+  }
+};
+
+window.selectAll  = function() { (window._members||[]).forEach(m => { window._selectedRecipients.add(m.id); const c=document.getElementById("chip_"+m.id); const k=document.getElementById("chk_"+m.id); if(c){c.classList.add("selected");k.textContent="✓";} }); };
+window.selectNone = function() { window._selectedRecipients.clear(); document.querySelectorAll(".recipient-chip").forEach(c=>{c.classList.remove("selected");}); document.querySelectorAll(".check").forEach(c=>{c.textContent="";}); };
+
+window.setPriority = function(el) {
+  document.querySelectorAll(".priority-btn").forEach(b => b.classList.remove("active"));
+  el.classList.add("active");
+  window._selectedPriority = el.dataset.p;
+};
+
+window.clearForm = function() {
+  document.getElementById("fTitle").value = "";
+  document.getElementById("fContent").value = "";
+  window.selectNone();
+};
+
+/* ══════════════════════════════════════
+   UI HELPERS
+══════════════════════════════════════ */
+window.showScreen = function(id) {
+  document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
+  document.getElementById(id).classList.add("active");
+};
+
+window.adminTab = function(el, tab) {
+  document.querySelectorAll("#screen-admin .nav-tab").forEach(t => t.classList.remove("active"));
+  if (el && el.classList) el.classList.add("active");
+  else { const tabs = {overview:0,send:1,tracking:2,schema:3,notif:4}; document.querySelectorAll("#screen-admin .nav-tab")[tabs[tab]]?.classList.add("active"); }
+  document.querySelectorAll("#screen-admin .tab-panel").forEach(p => p.classList.remove("active"));
+  document.getElementById("tab-"+tab).classList.add("active");
+};
+
+window.memberTab = function(el, filter) {
+  document.querySelectorAll("#screen-member .nav-tab").forEach(t => t.classList.remove("active"));
+  el.classList.add("active");
+  if (currentUser) {
+    const q2 = query(collection(db,"taskAssignments"),where("userId","==",currentUser.uid));
+    getDocs(q2).then(async snap => {
+      const assignments = snap.docs.map(d=>({id:d.id,...d.data()}));
+      await renderMemberTasks(assignments, filter);
+    });
+  }
+};
+
+function setTopbarUser(name, role) {
+  const initial = (name||"م")[0];
+  if (role === "admin") {
+    document.getElementById("adminUserName").textContent = name||"المدير";
+    document.getElementById("adminAvatar").textContent   = initial;
+  } else {
+    document.getElementById("memberName").textContent  = name||"عضو";
+    document.getElementById("memberAvatar").textContent = initial;
+  }
+}
+
+function setLoading(btnId, loading) {
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+  btn.disabled = loading;
+  btn.textContent = loading ? "⏳ جاري..." : (btnId==="btnLogin"?"🔐 دخول آمن":"📤 إرسال التوجيه");
+}
+
+window.showToast = function(msg, type) {
+  const c = document.getElementById("toastContainer");
+  const t = document.createElement("div");
+  t.className = `toast ${type||""}`;
+  t.innerHTML = msg;
+  c.appendChild(t);
+  setTimeout(() => { t.style.opacity="0"; t.style.transition="all 0.3s"; setTimeout(()=>t.remove(),300); }, 3500);
+};
+
+// Init deadline
+setTimeout(() => {
+  const dl = document.getElementById("fDeadline");
+  if (dl) dl.value = new Date(Date.now()+3600000).toISOString().slice(0,16);
+}, 100);
+</script>
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+  :root {
+    --bg:#060810;--surface:#0d1117;--surface2:#161b22;--surface3:#21262d;
+    --border:#30363d;--border-bright:#444c56;
+    --text:#e6edf3;--text-muted:#8b949e;--text-dim:#484f58;
+    --accent:#f0a500;--accent-dim:rgba(240,165,0,0.15);
+    --red:#f85149;--red-dim:rgba(248,81,73,0.15);
+    --green:#3fb950;--green-dim:rgba(63,185,80,0.12);
+    --blue:#388bfd;--blue-dim:rgba(56,139,253,0.12);
+    --orange:#d29922;--purple:#a371f7;
+    --radius:8px;--radius-lg:12px;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:'IBM Plex Sans Arabic',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;}
+  body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(240,165,0,0.015) 1px,transparent 1px),linear-gradient(90deg,rgba(240,165,0,0.015) 1px,transparent 1px);background-size:40px 40px;pointer-events:none;z-index:0;}
+  .screen{display:none;min-height:100vh;position:relative;z-index:1;}
+  .screen.active{display:flex;}
+  /* LOGIN */
+  #screen-login{flex-direction:column;align-items:center;justify-content:center;background:radial-gradient(ellipse at 50% 0%,rgba(240,165,0,0.07) 0%,transparent 60%);padding:24px;}
+  .login-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:40px 36px;width:100%;max-width:400px;box-shadow:0 24px 64px rgba(0,0,0,0.6);animation:fadeUp .5s ease;}
+  .login-logo{display:flex;align-items:center;gap:12px;margin-bottom:32px;}
+  .login-logo-icon{width:44px;height:44px;background:linear-gradient(135deg,var(--accent),#c87800);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 4px 16px rgba(240,165,0,0.3);}
+  .login-logo-text strong{font-size:18px;font-weight:700;display:block;}
+  .login-logo-text span{font-size:11px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;}
+  .login-card h2{font-size:22px;font-weight:600;margin-bottom:6px;}
+  .login-card p{font-size:13px;color:var(--text-muted);margin-bottom:28px;}
+  /* FIELDS */
+  .field{margin-bottom:16px;}
+  .field label{display:block;font-size:12px;font-weight:500;color:var(--text-muted);margin-bottom:6px;letter-spacing:.05em;text-transform:uppercase;}
+  .field input,.field select,.field textarea{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;font-size:14px;font-family:inherit;color:var(--text);transition:border-color .2s,box-shadow .2s;outline:none;}
+  .field input:focus,.field select:focus,.field textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim);}
+  .field textarea{resize:vertical;min-height:90px;}
+  .field select option{background:var(--surface2);}
+  .login-error{background:var(--red-dim);border:1px solid var(--red);border-radius:var(--radius);padding:10px 14px;font-size:13px;color:var(--red);margin-bottom:16px;display:none;}
+  .login-footer{margin-top:20px;text-align:center;font-size:11px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;}
+  /* BTNS */
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 20px;border-radius:var(--radius);font-size:14px;font-family:inherit;font-weight:500;cursor:pointer;border:1px solid transparent;transition:all .2s;white-space:nowrap;}
+  .btn-primary{background:var(--accent);color:#000;border-color:var(--accent);box-shadow:0 2px 8px rgba(240,165,0,0.25);}
+  .btn-primary:hover{background:#e09400;}
+  .btn-ghost{background:transparent;color:var(--text-muted);border-color:var(--border);}
+  .btn-ghost:hover{background:var(--surface2);color:var(--text);}
+  .btn-danger{background:var(--red-dim);color:var(--red);border-color:var(--red);}
+  .btn-danger:hover{background:rgba(248,81,73,0.25);}
+  .btn-sm{padding:6px 12px;font-size:12px;}
+  .btn-full{width:100%;}
+  .btn:disabled{opacity:.45;cursor:not-allowed;}
+  /* LAYOUT */
+  .app-layout{flex-direction:column;width:100%;}
+  .topbar{height:56px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:16px;position:sticky;top:0;z-index:100;}
+  .topbar-logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;color:var(--accent);}
+  .topbar-logo-icon{width:30px;height:30px;background:linear-gradient(135deg,var(--accent),#c87800);border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:14px;}
+  .topbar-sep{width:1px;height:24px;background:var(--border);}
+  .topbar-title{font-size:14px;color:var(--text-muted);}
+  .topbar-spacer{flex:1;}
+  .topbar-user{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--text-muted);}
+  .avatar{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#000;background:linear-gradient(135deg,var(--accent),#c87800);flex-shrink:0;}
+  .alert-badge{background:var(--red);color:#fff;border-radius:999px;font-size:10px;font-weight:700;padding:2px 6px;min-width:18px;text-align:center;}
+  .nav-tabs{display:flex;gap:2px;padding:12px 20px 0;border-bottom:1px solid var(--border);background:var(--surface);overflow-x:auto;scrollbar-width:none;}
+  .nav-tabs::-webkit-scrollbar{display:none;}
+  .nav-tab{padding:8px 16px;border-radius:var(--radius) var(--radius) 0 0;font-size:13px;font-weight:500;color:var(--text-muted);cursor:pointer;border:1px solid transparent;border-bottom:none;transition:all .2s;white-space:nowrap;position:relative;bottom:-1px;display:flex;align-items:center;gap:6px;background:transparent;}
+  .nav-tab.active{color:var(--text);background:var(--bg);border-color:var(--border);border-bottom-color:var(--bg);}
+  .nav-tab:hover:not(.active){color:var(--text);background:var(--surface2);}
+  .content{flex:1;padding:24px 20px;max-width:1200px;width:100%;margin:0 auto;}
+  /* STATS */
+  .stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:24px;}
+  .stat-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:16px 20px;}
+  .stat-label{font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;}
+  .stat-value{font-size:28px;font-weight:700;font-family:'JetBrains Mono',monospace;line-height:1;}
+  .stat-value.accent{color:var(--accent);}.stat-value.red{color:var(--red);}.stat-value.green{color:var(--green);}.stat-value.blue{color:var(--blue);}
+  .stat-sub{font-size:11px;color:var(--text-dim);margin-top:4px;}
+  .section-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;}
+  .section-title{font-size:15px;font-weight:600;}
+  /* CARDS */
+  .task-form-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;margin-bottom:24px;}
+  .card-header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--surface2);}
+  .card-header-title{font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px;}
+  .card-body{padding:20px;}
+  .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .form-grid .full{grid-column:1/-1;}
+  .priority-group{display:flex;gap:8px;}
+  .priority-btn{flex:1;padding:8px 10px;border-radius:var(--radius);border:1px solid var(--border);background:transparent;color:var(--text-muted);font-size:12px;font-family:inherit;cursor:pointer;transition:all .2s;}
+  .priority-btn[data-p="عاجل"].active{background:var(--red-dim);border-color:var(--red);color:var(--red);}
+  .priority-btn[data-p="مهم"].active{background:rgba(210,153,34,0.15);border-color:var(--orange);color:var(--orange);}
+  .priority-btn[data-p="عادي"].active{background:var(--blue-dim);border-color:var(--blue);color:var(--blue);}
+  .recipients-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px;margin-top:8px;}
+  .recipient-chip{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;transition:all .2s;font-size:13px;}
+  .recipient-chip.selected{background:var(--accent-dim);border-color:var(--accent);color:var(--accent);}
+  .check{width:16px;height:16px;border-radius:4px;border:1.5px solid var(--border);transition:all .2s;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:10px;}
+  .recipient-chip.selected .check{background:var(--accent);border-color:var(--accent);color:#000;}
+  /* TABLE */
+  .tasks-table-wrap{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;overflow-x:auto;}
+  table{width:100%;border-collapse:collapse;min-width:700px;}
+  thead tr{background:var(--surface2);}
+  th{padding:10px 16px;text-align:right;font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border);white-space:nowrap;}
+  td{padding:12px 16px;font-size:13px;border-bottom:1px solid var(--border);vertical-align:middle;}
+  tr:last-child td{border-bottom:none;}
+  tr:hover td{background:var(--surface2);}
+  /* BADGE */
+  .badge{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:600;}
+  .badge-red{background:var(--red-dim);color:var(--red);}
+  .badge-orange{background:rgba(210,153,34,0.15);color:var(--orange);}
+  .badge-blue{background:var(--blue-dim);color:var(--blue);}
+  .badge-green{background:var(--green-dim);color:var(--green);}
+  .badge-purple{background:rgba(163,113,247,0.15);color:var(--purple);}
+  .badge-gray{background:var(--surface3);color:var(--text-muted);}
+  /* TRACKING */
+  .tracking-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;margin-top:24px;}
+  .member-row{display:grid;grid-template-columns:200px 1fr 120px 120px 130px;min-width:640px;}
+  .member-row>div{padding:12px 14px;font-size:13px;border-bottom:1px solid var(--border);display:flex;align-items:center;}
+  .member-row.head>div{background:var(--surface2);font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;}
+  .read-dot{width:8px;height:8px;border-radius:50%;margin-left:6px;flex-shrink:0;}
+  .read-dot.delivered{background:var(--blue);box-shadow:0 0 6px var(--blue);}
+  .read-dot.opened{background:var(--green);box-shadow:0 0 6px var(--green);}
+  .read-dot.pending{background:var(--text-dim);}
+  .ts{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-muted);}
+  /* MEMBER TASKS */
+  #screen-member .content{max-width:680px;}
+  .member-task-list{display:flex;flex-direction:column;gap:12px;}
+  .task-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;transition:border-color .2s,box-shadow .2s;cursor:pointer;}
+  .task-card:hover{border-color:var(--border-bright);box-shadow:0 4px 20px rgba(0,0,0,0.3);}
+  .task-card.unread{border-right:3px solid var(--accent);}
+  .task-card.critical{border-right:3px solid var(--red);}
+  .task-card-header{padding:14px 16px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;}
+  .task-card-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;}
+  .task-card-title{font-size:15px;font-weight:600;line-height:1.4;}
+  .task-card-body{padding:0 16px 14px;font-size:13px;color:var(--text-muted);line-height:1.6;}
+  .task-card-footer{padding:10px 16px;border-top:1px solid var(--border);background:var(--surface2);display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--text-muted);}
+  .task-status-select{background:var(--surface3);border:1px solid var(--border);border-radius:var(--radius);padding:5px 10px;font-size:12px;font-family:inherit;color:var(--text);cursor:pointer;outline:none;}
+  /* SCHEMA */
+  .schema-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;margin-bottom:16px;}
+  .schema-code{font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.8;padding:20px;color:var(--text);overflow-x:auto;background:#0a0d12;}
+  .sk{color:#f97316;}.sv{color:#60a5fa;}.sc{color:#4ade80;}.sd{color:var(--text-dim);}
+  /* MODAL */
+  .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px;opacity:0;pointer-events:none;transition:opacity .3s;backdrop-filter:blur(4px);}
+  .modal-overlay.visible{opacity:1;pointer-events:all;}
+  .critical-modal{background:var(--surface);border:2px solid var(--red);border-radius:var(--radius-lg);max-width:420px;width:100%;box-shadow:0 0 0 4px rgba(248,81,73,0.1),0 0 60px rgba(248,81,73,0.2);animation:criticalIn .4s cubic-bezier(0.34,1.56,0.64,1);overflow:hidden;}
+  @keyframes criticalIn{from{transform:scale(0.7) translateY(40px);opacity:0;}to{transform:scale(1) translateY(0);opacity:1;}}
+  .critical-header{background:linear-gradient(135deg,#3d0d0d,#1a0505);border-bottom:1px solid var(--red);padding:16px 20px;display:flex;align-items:center;gap:12px;}
+  .critical-icon{width:44px;height:44px;background:var(--red);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;animation:alertPulse 1s infinite;flex-shrink:0;}
+  @keyframes alertPulse{0%,100%{box-shadow:0 0 0 0 rgba(248,81,73,0.6);}50%{box-shadow:0 0 0 12px rgba(248,81,73,0);}}
+  .critical-header-text strong{font-size:16px;color:var(--red);display:block;}
+  .critical-header-text span{font-size:12px;color:rgba(248,81,73,0.7);font-family:'JetBrains Mono',monospace;}
+  .critical-body{padding:20px;}
+  .critical-task-title{font-size:17px;font-weight:700;margin-bottom:10px;}
+  .critical-task-text{font-size:13px;color:var(--text-muted);line-height:1.6;margin-bottom:16px;}
+  .critical-footer{padding:16px 20px;border-top:1px solid var(--border);display:flex;gap:10px;}
+  /* TOAST */
+  .toast-container{position:fixed;top:70px;left:50%;transform:translateX(-50%);z-index:8888;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none;}
+  .toast{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 16px;font-size:13px;color:var(--text);box-shadow:0 8px 32px rgba(0,0,0,0.4);display:flex;align-items:center;gap:10px;min-width:280px;max-width:380px;animation:toastIn .3s ease;pointer-events:all;}
+  .toast.success{border-color:var(--green);}.toast.error{border-color:var(--red);}.toast.warning{border-color:var(--accent);}
+  @keyframes toastIn{from{opacity:0;transform:translateY(-12px);}to{opacity:1;transform:translateY(0);}}
+  /* MISC */
+  .tab-panel{display:none;}.tab-panel.active{display:block;}
+  .empty-state{text-align:center;padding:48px 20px;color:var(--text-muted);font-size:13px;}
+  .empty-state .icon{font-size:36px;margin-bottom:12px;opacity:.4;}
+  .divider{height:1px;background:var(--border);margin:20px 0;}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(20px);}to{opacity:1;transform:translateY(0);}}
+  .fade-in{animation:fadeUp .4s ease;}
+  .spinner{width:28px;height:28px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 12px;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  ::-webkit-scrollbar{width:6px;height:6px;}::-webkit-scrollbar-track{background:transparent;}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px;}
+  @media(max-width:640px){.form-grid{grid-template-columns:1fr;}.form-grid .full{grid-column:1;}.stats-row{grid-template-columns:repeat(2,1fr);}.content{padding:16px 12px;}.topbar{padding:0 12px;}}
+
+  /* Firebase status bar */
+  .firebase-bar{background:linear-gradient(90deg,rgba(255,165,0,0.08),transparent);border-bottom:1px solid rgba(255,165,0,0.15);padding:6px 20px;display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;}
+  .fb-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green);}
+</style>
+</head>
+<body>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- CRITICAL MODAL -->
+<div class="modal-overlay" id="criticalModal">
+  <div class="critical-modal">
+    <div class="critical-header">
+      <div class="critical-icon">🚨</div>
+      <div class="critical-header-text">
+        <strong>⚡ تنبيه حرج — تفاعل فوري مطلوب</strong>
+        <span>CRITICAL · Firebase FCM · OVERRIDE SILENT</span>
+      </div>
+    </div>
+    <div class="critical-body">
+      <div class="task-card-meta" style="margin-bottom:10px">
+        <span class="badge badge-red">🔴 عاجل جداً</span>
+      </div>
+      <div class="critical-task-title" id="modalTaskTitle">...</div>
+      <div class="critical-task-text" id="modalTaskText">...</div>
+    </div>
+    <div class="critical-footer">
+      <button class="btn btn-danger btn-full" onclick="acknowledgeAlert()">✅ تم الاستلام — سأتصرف فوراً</button>
+      <button class="btn btn-ghost btn-sm" onclick="closeModal()">لاحقاً</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════ LOGIN ════ -->
+<div class="screen active" id="screen-login">
+  <div class="login-card">
+    <div class="login-logo">
+      <div class="login-logo-icon">📡</div>
+      <div class="login-logo-text">
+        <strong>MOTS</strong>
+        <span>Media Operations & Task System</span>
+      </div>
+    </div>
+    <h2>تسجيل الدخول</h2>
+    <p>النظام مقيد — Firebase Authentication</p>
+    <div id="loginError" class="login-error"></div>
+    <div class="field">
+      <label>البريد الإلكتروني</label>
+      <input type="email" id="loginEmail" placeholder="your@email.com">
+    </div>
+    <div class="field">
+      <label>كلمة المرور</label>
+      <input type="password" id="loginPass" placeholder="••••••••" onkeydown="if(event.key==='Enter')doLogin()">
+    </div>
+    <button class="btn btn-primary btn-full" id="btnLogin" onclick="doLogin()">🔐 دخول آمن</button>
+    <div class="login-footer" style="margin-top:16px">
+      🔥 Powered by Firebase · teams-5365d · TLS 1.3
+    </div>
+  </div>
+</div>
+
+<!-- ════ ADMIN ════ -->
+<div class="screen app-layout" id="screen-admin">
+  <div class="firebase-bar">
+    <div class="fb-dot"></div>
+    متصل بـ Firebase Firestore · teams-5365d · Real-time sync نشط
+  </div>
+  <div class="topbar">
+    <div class="topbar-logo"><div class="topbar-logo-icon">📡</div>MOTS</div>
+    <div class="topbar-sep"></div>
+    <div class="topbar-title">لوحة التحكم الإدارية</div>
+    <div class="topbar-spacer"></div>
+    <div class="topbar-user">
+      <div class="avatar" id="adminAvatar">م</div>
+      <span id="adminUserName">المدير</span>
+    </div>
+    <button class="btn btn-ghost btn-sm" onclick="logout()">خروج</button>
+  </div>
+  <div class="nav-tabs">
+    <div class="nav-tab active" onclick="adminTab(this,'overview')">📊 نظرة عامة</div>
+    <div class="nav-tab" onclick="adminTab(this,'send')">📤 إرسال مهمة</div>
+    <div class="nav-tab" onclick="adminTab(this,'tracking')">👁 الرصد</div>
+    <div class="nav-tab" onclick="adminTab(this,'schema')">🗄 قاعدة البيانات</div>
+  </div>
+  <div class="content">
+
+    <!-- OVERVIEW -->
+    <div class="tab-panel active" id="tab-overview">
+      <div class="stats-row fade-in">
+        <div class="stat-card"><div class="stat-label">إجمالي المهام</div><div class="stat-value accent" id="statTotal">—</div><div class="stat-sub">من Firestore</div></div>
+        <div class="stat-card"><div class="stat-label">معلقة</div><div class="stat-value red" id="statPending">—</div><div class="stat-sub">تنتظر تنفيذاً</div></div>
+        <div class="stat-card"><div class="stat-label">مكتملة</div><div class="stat-value green" id="statDone">—</div></div>
+        <div class="stat-card"><div class="stat-label">قاعدة البيانات</div><div class="stat-value blue" style="font-size:14px;margin-top:4px">🔥 Live</div><div class="stat-sub">Real-time</div></div>
+      </div>
+      <div class="section-header">
+        <div class="section-title">آخر المهام</div>
+        <button class="btn btn-ghost btn-sm" onclick="adminTab(document.querySelectorAll('#screen-admin .nav-tab')[1],'send')">+ مهمة جديدة</button>
+      </div>
+      <div class="tasks-table-wrap fade-in">
+        <table>
+          <thead><tr><th>#</th><th>العنوان</th><th>التصنيف</th><th>الأولوية</th><th>المستلمون</th><th>الحالة</th><th>الوقت</th><th></th></tr></thead>
+          <tbody id="adminTasksBody"><tr><td colspan="8"><div class="empty-state"><div class="spinner"></div></div></td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- SEND TASK -->
+    <div class="tab-panel" id="tab-send">
+      <div class="task-form-card fade-in">
+        <div class="card-header"><div class="card-header-title">📤 إرسال توجيه إعلامي جديد — يُحفظ في Firestore</div></div>
+        <div class="card-body">
+          <div class="form-grid">
+            <div class="field full"><label>عنوان المهمة</label><input type="text" id="fTitle" placeholder="مثال: تغطية مؤتمر صحفي عاجل"></div>
+            <div class="field"><label>التصنيف</label>
+              <select id="fCategory">
+                <option>حملات إعلامية</option>
+                <option>متابعة عاجلة</option>
+                <option>اهتمام وتسويق</option>
+              </select>
+            </div>
+            <div class="field"><label>الأهمية</label>
+              <div class="priority-group">
+                <button class="priority-btn active" data-p="عاجل" onclick="setPriority(this)">🔴 عاجل</button>
+                <button class="priority-btn" data-p="مهم" onclick="setPriority(this)">🟡 مهم</button>
+                <button class="priority-btn" data-p="عادي" onclick="setPriority(this)">🔵 عادي</button>
+              </div>
+            </div>
+            <div class="field full"><label>نص التوجيه</label><textarea id="fContent" placeholder="التعليمات الكاملة..."></textarea></div>
+            <div class="field"><label>الوقت المستهدف</label><input type="datetime-local" id="fDeadline"></div>
+            <div class="field"><label>نوع التنبيه</label>
+              <select id="fNotifType">
+                <option value="normal">🔔 عادي</option>
+                <option value="critical">🚨 حرج (Override Silent)</option>
+              </select>
+            </div>
+            <div class="field full">
+              <label>إرسال إلى</label>
+              <div style="display:flex;gap:8px;margin-bottom:8px">
+                <button class="btn btn-ghost btn-sm" onclick="selectAll()">تحديد الكل</button>
+                <button class="btn btn-ghost btn-sm" onclick="selectNone()">إلغاء الكل</button>
+              </div>
+              <div class="recipients-grid" id="recipientsGrid"><div class="spinner" style="margin:12px 0"></div></div>
+            </div>
+          </div>
+          <div class="divider"></div>
+          <div style="display:flex;gap:10px;justify-content:flex-end">
+            <button class="btn btn-ghost" onclick="clearForm()">مسح</button>
+            <button class="btn btn-primary" id="btnSend" onclick="sendTask()">📤 إرسال التوجيه</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TRACKING -->
+    <div class="tab-panel" id="tab-tracking">
+      <div class="section-header">
+        <div class="section-title">👁 رصد تفاعل الأعضاء — Real-time</div>
+        <div style="font-size:12px;color:var(--green)">● يتحدث تلقائياً</div>
+      </div>
+      <div class="tracking-card fade-in">
+        <div style="overflow-x:auto">
+          <div class="member-row head">
+            <div>معرف العضو</div><div>المهمة</div><div>وصل التنبيه</div><div>فتح المهمة</div><div>الحالة</div>
+          </div>
+          <div id="trackingBody"><div class="empty-state"><div class="spinner"></div></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCHEMA -->
+    <div class="tab-panel" id="tab-schema">
+      <div class="section-title" style="margin-bottom:16px">🗄 هيكل Firestore — مشروع teams-5365d</div>
+      <div class="schema-card fade-in">
+        <div class="card-header"><div class="card-header-title">📋 المجموعات الأربع</div></div>
+        <div class="schema-code"><pre><span class="sd">// Firestore Collections — teams-5365d</span>
+
+<span class="sk">users</span>/uid → {
+  <span class="sv">name</span>, <span class="sv">email</span>, <span class="sv">role</span>: <span class="sc">"admin"|"member"</span>
+  <span class="sv">fcmToken</span>: <span class="sc">string</span>    <span class="sd">// للتنبيهات</span>
+  <span class="sv">isActive</span>, <span class="sv">lastSeen</span>
+}
+
+<span class="sk">tasks</span>/taskId → {
+  <span class="sv">title</span>, <span class="sv">content</span>, <span class="sv">category</span>, <span class="sv">priority</span>
+  <span class="sv">notifType</span>: <span class="sc">"normal"|"critical"</span>
+  <span class="sv">recipients</span>: <span class="sc">string[]</span>   <span class="sd">// قائمة UIDs</span>
+  <span class="sv">targetDeadline</span>: <span class="sc">timestamp</span>
+  <span class="sv">createdBy</span>, <span class="sv">createdAt</span>
+}
+
+<span class="sk">taskAssignments</span>/id → {
+  <span class="sv">taskId</span>, <span class="sv">userId</span>
+  <span class="sv">notifSentAt</span>: <span class="sc">timestamp</span>      <span class="sd">// ← وقت الإرسال</span>
+  <span class="sv">notifDeliveredAt</span>: <span class="sc">timestamp</span>  <span class="sd">// ← وصل للجهاز</span>
+  <span class="sv">openedAt</span>: <span class="sc">timestamp</span>          <span class="sd">// ← Read Receipt</span>
+  <span class="sv">acknowledgedAt</span>: <span class="sc">timestamp</span>    <span class="sd">// ← أقرّ بالاستلام</span>
+  <span class="sv">status</span>: <span class="sc">"pending"|"in_progress"|"completed"</span>
+}
+
+<span class="sk">notifications</span>/id → {
+  <span class="sv">taskId</span>, <span class="sv">userId</span>
+  <span class="sv">type</span>: <span class="sc">"normal"|"critical"</span>
+  <span class="sv">fcmMessageId</span>: <span class="sc">string</span>
+  <span class="sv">platform</span>: <span class="sc">"ios"|"android"|"web"</span>
+  <span class="sv">sentAt</span>, <span class="sv">deliveredAt</span>
+}</pre></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ════ MEMBER ════ -->
+<div class="screen app-layout" id="screen-member">
+  <div class="topbar">
+    <div class="topbar-logo"><div class="topbar-logo-icon">📡</div>MOTS</div>
+    <div class="topbar-sep"></div>
+    <div class="topbar-title">بوابة الأعضاء</div>
+    <div class="topbar-spacer"></div>
+    <span class="alert-badge" id="memberBadge" style="display:none">0</span>
+    <div class="topbar-user">
+      <div class="avatar" id="memberAvatar">أ</div>
+      <span id="memberName">عضو</span>
+    </div>
+    <button class="btn btn-ghost btn-sm" onclick="logout()">خروج</button>
+  </div>
+  <div class="nav-tabs">
+    <div class="nav-tab active" onclick="memberTab(this,'all')">📋 جميع المهام</div>
+    <div class="nav-tab" onclick="memberTab(this,'urgent')">⚡ عاجلة</div>
+    <div class="nav-tab" onclick="memberTab(this,'done')">✅ مكتملة</div>
+  </div>
+  <div class="content">
+    <div class="member-task-list fade-in" id="memberTaskList">
+      <div class="empty-state"><div class="spinner"></div><div>جاري التحميل من Firebase...</div></div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
