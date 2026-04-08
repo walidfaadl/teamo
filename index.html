@@ -405,6 +405,7 @@ async function renderMemberTasks(assignments, filter) {
     const ts2 = t.createdAt?.toDate ? t.createdAt.toDate().toLocaleTimeString("ar", { hour: "2-digit", minute: "2-digit" }) : "—";
     const sl = a.status === "pending" ? "معلق" : a.status === "in_progress" ? "جاري" : "مكتمل";
     const sc = a.status === "pending" ? "chip-gray" : a.status === "in_progress" ? "chip-orange" : "chip-green";
+    const countdown = a.status !== "completed" ? window.buildCountdown(t.targetDeadline) : "";
     return `<div class="task-card ${isUnread ? "unread" : ""} ${isCrit ? "critical" : ""}" onclick="openTaskDetailsModal('${a.id}')">
       <div class="task-card-top">
         <div class="task-chips">
@@ -417,6 +418,7 @@ async function renderMemberTasks(assignments, filter) {
         <span class="task-time">${ts2}</span>
       </div>
       <div class="task-title">${t.title}</div>
+      ${countdown ? `<div style="margin-top:8px">${countdown}</div>` : ""}
     </div>`;
   }).join("");
 }
@@ -496,6 +498,7 @@ function renderAdminTasks(tasks) {
     const sl = t.status === "pending" ? "معلق" : t.status === "in_progress" ? "جاري" : "مكتمل";
     const ts = t.createdAt?.toDate ? t.createdAt.toDate().toLocaleTimeString("ar", { hour: "2-digit", minute: "2-digit" }) : "—";
     const st = (t.title||"").replace(/'/g,"\\'"), sc = (t.content||"").replace(/'/g,"\\'");
+    const countdown = t.status !== "completed" ? window.buildCountdown(t.targetDeadline) : "";
     return `<div class="task-card" style="cursor:pointer;" onclick="openAdminTaskDetails('${t.id}')">
       <div class="task-card-top">
         <div class="task-chips"><span class="chip ${pb}">${t.priority}</span><span class="chip ${sb}">${sl}</span></div>
@@ -503,6 +506,7 @@ function renderAdminTasks(tasks) {
       </div>
       <div class="task-title">${t.title}</div>
       <div style="font-size:12px;color:var(--text-muted);margin-top:4px">${t.category} · ${(t.recipients||[]).length} مستلم</div>
+      ${countdown ? `<div style="margin-top:8px">${countdown}</div>` : ""}
       <div class="task-footer" style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px;">
         <button class="icon-btn" style="margin-left:6px" onclick="event.stopPropagation();editAdminTask('${t.id}','${st}','${sc}','${t.priority}','${t.fileUrl||null}')">✏️</button>
         <button class="icon-btn danger" onclick="event.stopPropagation();deleteAdminTask('${t.id}')">🗑️</button>
@@ -695,6 +699,32 @@ window.showToast = function(msg, type) {
   t.className = `toast ${type||""}`; t.innerHTML = msg; c.appendChild(t);
   setTimeout(() => { t.style.opacity="0"; t.style.transition="all .3s"; setTimeout(()=>t.remove(),300); }, 3000);
 };
+
+/* ══ COUNTDOWN TIMERS ══ */
+function formatCountdown(ms) {
+  if (ms <= 0) return { text: "انتهى الوقت !", cls: "expired" };
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  const cls = ms < 1800000 ? "urgent" : ms < 10800000 ? "warning" : "normal";
+  const text = h > 0 ? `${h}س ${m}د` : m > 0 ? `${m}د ${s}ث` : `${s}ث`;
+  return { text, cls };
+}
+setInterval(() => {
+  document.querySelectorAll("[data-deadline]").forEach(el => {
+    const ms = parseInt(el.dataset.deadline) - Date.now();
+    const { text, cls } = formatCountdown(ms);
+    el.textContent = "⏱ " + text;
+    el.className = "countdown-wrap " + cls;
+  });
+}, 1000);
+window.buildCountdown = function(deadline) {
+  if (!deadline) return "";
+  const ts = deadline?.toMillis ? deadline.toMillis() : (deadline instanceof Date ? deadline.getTime() : null);
+  if (!ts) return "";
+  const { text, cls } = formatCountdown(ts - Date.now());
+  return `<span class="countdown-wrap ${cls}" data-deadline="${ts}">⏱ ${text}</span>`;
+};
 </script>
 </head>
 <body>
@@ -819,9 +849,11 @@ window.showToast = function(msg, type) {
       <p>Media Operations & Task System</p>
     </div>
     <div id="loginError" class="login-error"></div>
+    <div class="login-card">
     <div class="field"><label>البريد الإلكتروني</label><input type="email" id="loginEmail" placeholder="your@email.com" inputmode="email" autocomplete="email"></div>
     <div class="field"><label>كلمة المرور</label><input type="password" id="loginPass" placeholder="••••••••" onkeydown="if(event.key==='Enter')doLogin()"></div>
     <button class="login-btn" id="btnLogin" onclick="doLogin()">دخول</button>
+    </div>
   </div>
 </div>
 
