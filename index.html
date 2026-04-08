@@ -132,15 +132,20 @@ window.closeMemberDrawer = function() {
 function startAdminListeners() {
   const u=onSnapshot(query(collection(db,"tasks"),orderBy("createdAt","desc")),snap=>{
     const tasks=snap.docs.map(d=>({id:d.id,...d.data()}));
+    window._allTasks = tasks; // لحفظ المهام واستخدامها في جدول الملاحظات
     renderAdminTasks(tasks);
     document.getElementById("statTotal").textContent=tasks.length;
     document.getElementById("statPending").textContent=tasks.filter(t=>t.status==="pending").length;
     document.getElementById("statDone").textContent=tasks.filter(t=>t.status==="completed").length;
+    if(window._allAssignments) renderNotesTable(window._allAssignments);
   });
   unsubListeners.push(u);
   
   const u2=onSnapshot(query(collection(db,"taskAssignments"),orderBy("notifSentAt","desc")),snap=>{
-    renderTracking(snap.docs.map(d=>({id:d.id,...d.data()})));
+    const assignments=snap.docs.map(d=>({id:d.id,...d.data()}));
+    window._allAssignments = assignments;
+    renderTracking(assignments);
+    renderNotesTable(assignments); // تحديث جدول الملاحظات
   });
   unsubListeners.push(u2);
   loadMembers();
@@ -323,7 +328,7 @@ window.deleteAdminTask = async function(id) {
 };
 
 /* ══ MEMBER PORTAL (المهام כعناوين) ══ */
-window._memberTasksMap = {}; // خريطة لتخزين تفاصيل المهام
+window._memberTasksMap = {}; 
 let isFirstTaskLoad = true;
 
 function startMemberListeners(){
@@ -362,7 +367,7 @@ async function renderMemberTasks(assignments,filter){
       if(ts.exists()) {
         const tData = {id:ts.id,...ts.data()};
         tasksData.push({a, t: tData});
-        window._memberTasksMap[a.id] = {a, t: tData}; // حفظ بالخريطة للنافذة المنبثقة
+        window._memberTasksMap[a.id] = {a, t: tData}; 
       }
     }catch(e){}
   }
@@ -371,7 +376,6 @@ async function renderMemberTasks(assignments,filter){
   if(filter==="urgent")filtered=tasksData.filter(x=>x.t.priority==="عاجل");
   else if(filter==="done")filtered=tasksData.filter(x=>x.a.status==="completed");
   
-  // ترتيب من الأحدث للأقدم
   filtered.sort((x, y) => (y.t.createdAt?.toMillis()||0) - (x.t.createdAt?.toMillis()||0));
   
   if(!filtered.length){list.innerHTML=`<div class="empty-card">📭<br>لا توجد مهام هنا</div>`;return;}
@@ -384,7 +388,6 @@ async function renderMemberTasks(assignments,filter){
     const statusLabel = a.status==="pending"?"معلق":a.status==="in_progress"?"جاري":"مكتمل";
     const statusColor = a.status==="pending"?"chip-gray":a.status==="in_progress"?"chip-orange":"chip-green";
     
-    // التصميم الجديد: كرت مصغر يظهر كعنوان فقط
     return `<div class="task-card ${isUnread?"unread":""} ${isCrit?"critical":""}" onclick="openTaskDetailsModal('${a.id}')" style="padding:12px; display:flex; align-items:center; justify-content:space-between; cursor:pointer;">
       <div style="flex:1; overflow:hidden;">
         <div style="font-size:14px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-bottom:6px;">${t.title}</div>
@@ -401,17 +404,11 @@ async function renderMemberTasks(assignments,filter){
   }).join("");
 }
 
-// فتح نافذة تفاصيل المهمة
 window.openTaskDetailsModal = async function(assignmentId) {
   const data = window._memberTasksMap[assignmentId];
   if(!data) return;
-  
   window._currentOpenTaskId = assignmentId;
-
-  // تسجيل الفتح إذا كانت جديدة
-  if(!data.a.openedAt) {
-    try { await updateDoc(doc(db,"taskAssignments",assignmentId),{openedAt:serverTimestamp()}); } catch(e){}
-  }
+  if(!data.a.openedAt) { try { await updateDoc(doc(db,"taskAssignments",assignmentId),{openedAt:serverTimestamp()}); } catch(e){} }
 
   document.getElementById("tdTitle").textContent = data.t.title;
   document.getElementById("tdContent").innerHTML = (data.t.content||"").replace(/\n/g, '<br>');
@@ -419,16 +416,12 @@ window.openTaskDetailsModal = async function(assignmentId) {
   const fileCont = document.getElementById("tdFileContainer");
   if(data.t.fileUrl) {
     fileCont.innerHTML = `<a href="${data.t.fileUrl}" target="_blank" class="chip chip-blue" style="text-decoration:none; padding:8px 14px; font-size:13px; display:inline-block;">📎 اضغط هنا لتحميل الملف المرفق</a>`;
-  } else {
-    fileCont.innerHTML = "";
-  }
+  } else { fileCont.innerHTML = ""; }
 
   document.getElementById("tdNote").value = data.a.note || "";
   document.getElementById("tdStatus").value = data.a.status || "pending";
-
   document.getElementById("taskDetailsModal").classList.add("visible");
 };
-
 window.closeTaskDetailsModal = () => document.getElementById("taskDetailsModal").classList.remove("visible");
 
 window.saveTaskDetails = async function() {
@@ -441,19 +434,11 @@ window.saveTaskDetails = async function() {
   btn.disabled = true;
 
   try {
-    await updateDoc(doc(db, "taskAssignments", id), {
-      status: status,
-      note: note,
-      statusUpdatedAt: serverTimestamp()
-    });
+    await updateDoc(doc(db, "taskAssignments", id), { status: status, note: note, statusUpdatedAt: serverTimestamp() });
     showToast("✅ تم حفظ التعديلات وإرسال الملاحظة", "success");
     closeTaskDetailsModal();
-  } catch(e) {
-    showToast("❌ خطأ أثناء الحفظ", "error");
-  }
-  
-  btn.textContent = "حفظ التعديلات";
-  btn.disabled = false;
+  } catch(e) { showToast("❌ خطأ أثناء الحفظ", "error"); }
+  btn.textContent = "حفظ التعديلات"; btn.disabled = false;
 };
 
 window.filterMemberTasks=function(filter,el){
@@ -464,25 +449,7 @@ window.filterMemberTasks=function(filter,el){
   });
 };
 
-/* ══ CRITICAL MODAL ══ */
-function showCriticalModal(task,assignmentId){
-  document.getElementById("modalTaskTitle").textContent=task.title||"";
-  document.getElementById("modalTaskText").textContent=task.content||"";
-  document.getElementById("criticalModal").classList.add("visible");
-  document.getElementById("criticalModal").dataset.assignmentId=assignmentId||"";
-  playAlertSound(); 
-}
-window.acknowledgeAlert = function() {
-  const modal = document.getElementById("criticalModal");
-  const id = modal.dataset.assignmentId;
-  modal.classList.remove("visible");
-  showToast("✅ تم الاستلام", "success");
-  if(id) { updateDoc(doc(db, "taskAssignments", id), { acknowledgedAt: serverTimestamp(), openedAt: serverTimestamp(), status: "in_progress" }).catch(e=>{}); }
-};
-window.closeModal=()=>document.getElementById("criticalModal").classList.remove("visible");
-
-
-/* ══ ADMIN RENDER ══ */
+/* ══ ADMIN RENDER & NOTES ══ */
 function renderAdminTasks(tasks){
   const list=document.getElementById("adminTaskList");
   if(!tasks.length){list.innerHTML=`<div class="empty-card">📋<br>لا توجد مهام بعد</div>`;return;}
@@ -491,19 +458,75 @@ function renderAdminTasks(tasks){
     const sb=t.status==="pending"?"chip-gray":t.status==="in_progress"?"chip-orange":"chip-green";
     const sl=t.status==="pending"?"معلق":t.status==="in_progress"?"جاري":"مكتمل";
     const ts=t.createdAt?.toDate?t.createdAt.toDate().toLocaleTimeString("ar",{hour:"2-digit",minute:"2-digit"}):"—";
-    return `<div class="task-card">
+    return `<div class="task-card" style="cursor:pointer;" onclick="openAdminTaskDetails('${t.id}')">
       <div class="task-card-top">
         <div class="task-chips"><span class="chip ${pb}">${t.priority}</span><span class="chip ${sb}">${sl}</span></div>
         <span class="task-time">${ts}</span>
       </div>
       <div class="task-title">${t.title}</div>
       <div class="task-body" style="font-size:12px;color:var(--text-muted)">${t.category} · ${(t.recipients||[]).length} مستلم</div>
-      ${t.fileUrl ? `<a href="${t.fileUrl}" target="_blank" class="chip chip-gray" style="margin-top:5px; text-decoration:none;">📎 مرفق</a>` : ''}
       <div class="task-footer" style="margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px;">
-        <button class="icon-btn" onclick="editAdminTask('${t.id}', '${t.title}', '${t.content}', '${t.priority}', '${t.fileUrl}')">✏️</button>
-        <button class="icon-btn danger" onclick="deleteAdminTask('${t.id}')">🗑️</button>
+        <button class="icon-btn" onclick="event.stopPropagation(); editAdminTask('${t.id}', '${t.title}', '${t.content}', '${t.priority}', '${t.fileUrl}')">✏️</button>
+        <button class="icon-btn danger" onclick="event.stopPropagation(); deleteAdminTask('${t.id}')">🗑️</button>
       </div>
     </div>`;
+  }).join("");
+}
+
+// عرض تفاصيل المهمة للمدير مع الملاحظات
+window.openAdminTaskDetails = function(taskId) {
+  const task = (window._allTasks || []).find(x => x.id === taskId);
+  if(!task) return;
+  
+  document.getElementById("adModalTitle").textContent = task.title;
+  let contentHtml = (task.content||"").replace(/\n/g, '<br>');
+  if(task.fileUrl) {
+    contentHtml += `<br><br><a href="${task.fileUrl}" target="_blank" class="chip chip-blue" style="text-decoration:none;">📎 تحميل الملف المرفق</a>`;
+  }
+  document.getElementById("adModalContent").innerHTML = contentHtml;
+
+  // استخراج الملاحظات لهذه المهمة
+  const taskAssigns = (window._allAssignments || []).filter(a => a.taskId === taskId && a.note && a.note.trim() !== "");
+  let notesHtml = "";
+  if(taskAssigns.length > 0) {
+    notesHtml = taskAssigns.map(a => {
+      const m = (window._members||[]).find(u => u.id === a.userId);
+      const mName = m ? m.name : "عضو";
+      return `<div style="background:var(--surface2); padding:10px; border-radius:8px; margin-bottom:8px; font-size:13px; line-height:1.5;">
+        <strong style="color:var(--accent); display:block; margin-bottom:4px;">👤 ${mName}:</strong> ${a.note}
+      </div>`;
+    }).join("");
+  } else {
+    notesHtml = "<div style='font-size:12px; color:var(--text-muted); text-align:center; padding:10px;'>لا توجد ملاحظات من الأعضاء على هذه المهمة حتى الآن.</div>";
+  }
+  document.getElementById("adModalNotes").innerHTML = notesHtml;
+  document.getElementById("adminTaskDetailsModal").classList.add("visible");
+};
+window.closeAdminTaskDetails = () => document.getElementById("adminTaskDetailsModal").classList.remove("visible");
+
+// دالة لإنشاء جدول الملاحظات الخاص بالمدير
+function renderNotesTable(assignments) {
+  const tbody = document.getElementById("adminNotesTableBody");
+  if(!tbody) return;
+  const notes = assignments.filter(a => a.note && a.note.trim() !== "");
+  
+  if(notes.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="3" style="text-align:center; padding:24px; color:var(--text-muted); font-size:13px;">لا توجد ملاحظات مسجلة بعد</td></tr>`;
+    return;
+  }
+  
+  tbody.innerHTML = notes.map(a => {
+    const task = (window._allTasks || []).find(t => t.id === a.taskId);
+    const taskName = task ? task.title : "مهمة محذوفة";
+    const member = (window._members || []).find(m => m.id === a.userId);
+    const memberName = member ? member.name : "عضو غير معروف";
+    return `
+      <tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:12px; font-size:13px; font-weight:600; color:var(--text);">${taskName}</td>
+        <td style="padding:12px; font-size:12px; color:var(--accent); white-space:nowrap;">${memberName}</td>
+        <td style="padding:12px; font-size:13px; color:var(--text-muted); line-height:1.5;">${a.note}</td>
+      </tr>
+    `;
   }).join("");
 }
 
@@ -527,10 +550,11 @@ function renderTracking(assignments){
         </div>
         <span class="chip ${sb}">${sl}</span>
       </div>
-      ${a.note ? `<div style="margin-top:8px; padding:6px 10px; background:var(--surface2); border-radius:6px; font-size:12px; color:var(--accent); width:100%;">💬 ملاحظة العضو: ${a.note}</div>` : ''}
+      ${a.note ? `<div style="margin-top:8px; padding:6px 10px; background:var(--surface2); border-radius:6px; font-size:12px; color:var(--accent); width:100%;">💬 ملاحظة مسجلة</div>` : ''}
     </div>`;
   }).join("");
 }
+
 
 /* ══ FORM / RECIPIENTS ══ */
 window._selectedRecipients=new Set(); window._selectedPriority="عاجل";
@@ -573,9 +597,9 @@ function loadChatUsers() {
   const list = document.getElementById("chatUsersList");
   let usersToShow = window._members || [];
   if(currentRole !== 'admin') {
-    usersToShow = usersToShow.filter(u => u.role === 'admin'); // العضو يراسل المدراء فقط
+    usersToShow = usersToShow.filter(u => u.role === 'admin');
   } else {
-    usersToShow = usersToShow.filter(u => u.id !== currentUser.uid); // المدير يرى الجميع
+    usersToShow = usersToShow.filter(u => u.id !== currentUser.uid);
   }
   
   list.innerHTML = usersToShow.map(u => `
@@ -596,10 +620,7 @@ window.openChatWith = function(uid, name) {
   
   const chatId = currentUser.uid < uid ? `${currentUser.uid}_${uid}` : `${uid}_${currentUser.uid}`;
   
-  // ✅ التحديث المهم لحل مشكلة عدم ظهور الرسائل (الاستغناء عن orderBy التي تتطلب Index)
   window._chatUnsub = onSnapshot(query(collection(db, "messages"), where("chatId", "==", chatId)), snap => {
-    
-    // جلب الرسائل وترتيبها برمجياً لتجنب مشاكل الفهرس (Index) في فايربيس
     let msgs = snap.docs.map(d => d.data());
     msgs.sort((a,b) => {
        const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : Date.now();
@@ -615,8 +636,6 @@ window.openChatWith = function(uid, name) {
         </span>
       </div>
     `).join("");
-    
-    // التمرير للأسفل لرؤية أحدث رسالة
     container.scrollTop = container.scrollHeight;
     
     if (!isFirstChatLoad) {
@@ -639,12 +658,11 @@ window.sendChatMessage = async function() {
   const chatId = currentUser.uid < uid ? `${currentUser.uid}_${uid}` : `${uid}_${currentUser.uid}`;
   
   try {
-    input.value = ""; // تفريغ الخانة فوراً لسرعة الاستجابة
+    input.value = ""; 
     await addDoc(collection(db, "messages"), {
       chatId, senderId: currentUser.uid, receiverId: uid, text, createdAt: serverTimestamp()
     });
   } catch(e) {
-    console.error("Chat Write Error:", e);
     showToast("❌ فشل الإرسال.", "error");
   }
 };
@@ -674,7 +692,8 @@ window.showAdminTab=function(tab){
   document.querySelectorAll(".admin-page").forEach(p=>p.classList.remove("active"));
   document.getElementById("page-"+tab).classList.add("active");
   document.querySelectorAll(".bottom-nav-btn").forEach(b=>b.classList.remove("active"));
-  const map={overview:0,send:1,tracking:2,members:3};
+  // تحديث الخريطة لتشمل تبويب الملاحظات الجديد في الشريط السفلي للمدير
+  const map={overview:0,send:1,tracking:2,notes:3,members:4};
   document.querySelectorAll(".bottom-nav-btn")[map[tab]]?.classList.add("active");
   closeDrawer();
   if(tab==="members")loadMembers();
@@ -690,18 +709,12 @@ window.showToast=function(msg,type){const c=document.getElementById("toastContai
 <div class="modal-overlay" id="taskDetailsModal">
   <div class="modal-sheet">
     <div id="tdTitle" style="font-size: 18px; font-weight: bold; margin-bottom: 12px; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 10px;">عنوان المهمة</div>
-    
-    <div id="tdContent" style="font-size: 14px; color: var(--text-muted); margin-bottom: 15px; line-height: 1.6; max-height: 40vh; overflow-y: auto;">
-      تفاصيل المهمة...
-    </div>
-    
+    <div id="tdContent" style="font-size: 14px; color: var(--text-muted); margin-bottom: 15px; line-height: 1.6; max-height: 40vh; overflow-y: auto;">تفاصيل المهمة...</div>
     <div id="tdFileContainer" style="margin-bottom: 15px;"></div>
-
     <div style="background: var(--surface2); padding: 12px; border-radius: var(--r-sm); margin-bottom: 15px;">
       <label style="font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 8px;">إرسال ملاحظة للإدارة (اختياري)</label>
       <textarea id="tdNote" style="width: 100%; background: var(--surface); border: 1px solid var(--border); color: #fff; padding: 10px; border-radius: 8px; resize: vertical; min-height: 60px; font-family: inherit; font-size:13px;" placeholder="اكتب ملاحظاتك هنا لتصل للمدير..."></textarea>
     </div>
-
     <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 15px;">
       <label style="font-size: 13px; color: var(--text-muted);">حالة المهمة:</label>
       <select id="tdStatus" style="flex: 1; padding: 10px; background: var(--surface2); border: 1px solid var(--border); color: #fff; border-radius: var(--r-sm); outline:none;">
@@ -710,10 +723,23 @@ window.showToast=function(msg,type){const c=document.getElementById("toastContai
         <option value="completed">✅ مكتملة</option>
       </select>
     </div>
-
     <div class="modal-form-btns">
       <button class="modal-cancel" onclick="closeTaskDetailsModal()">إغلاق</button>
       <button class="modal-confirm" id="btnSaveTaskDetails" onclick="saveTaskDetails()">حفظ التعديلات</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="adminTaskDetailsModal">
+  <div class="modal-sheet">
+    <div id="adModalTitle" style="font-size: 18px; font-weight: bold; margin-bottom: 12px; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 10px;">عنوان المهمة</div>
+    <div id="adModalContent" style="font-size: 14px; color: var(--text-muted); margin-bottom: 20px; line-height: 1.6; max-height: 30vh; overflow-y: auto;">تفاصيل...</div>
+    
+    <div style="font-weight:bold; margin-bottom:10px; font-size:14px; color:var(--text);">💬 ملاحظات الأعضاء:</div>
+    <div id="adModalNotes" style="max-height: 30vh; overflow-y: auto; display:flex; flex-direction:column; gap:8px; margin-bottom:15px;"></div>
+
+    <div class="modal-form-btns">
+      <button class="modal-cancel" style="width:100%" onclick="closeAdminTaskDetails()">إغلاق</button>
     </div>
   </div>
 </div>
@@ -780,7 +806,6 @@ window.showToast=function(msg,type){const c=document.getElementById("toastContai
       <button class="text-btn" onclick="closeChatModal()">إغلاق ✖</button>
     </div>
     <div id="chatUsersList" class="chat-users-list"></div>
-    
     <div id="chatArea" style="display:none; flex-direction:column; flex:1; overflow:hidden; border-top:1px solid var(--border); padding-top:10px;">
       <div id="chatTitle" style="font-weight:bold; margin-bottom:10px; color:var(--accent);"></div>
       <div id="chatMessages" style="flex:1; overflow-y:auto; margin-bottom:10px; padding-right:5px; display:flex; flex-direction:column;"></div>
@@ -819,6 +844,7 @@ window.showToast=function(msg,type){const c=document.getElementById("toastContai
     <div class="drawer-item" onclick="showAdminTab('overview')"><span>📊</span> نظرة عامة</div>
     <div class="drawer-item" onclick="showAdminTab('send')"><span>📤</span> إرسال مهمة</div>
     <div class="drawer-item" onclick="showAdminTab('tracking')"><span>👁</span> الرصد والتتبع</div>
+    <div class="drawer-item" onclick="showAdminTab('notes')"><span>📝</span> الملاحظات</div>
     <div class="drawer-item" onclick="showAdminTab('members')"><span>👥</span> إدارة الأعضاء</div>
     <div class="drawer-item" onclick="openChatModal(); closeDrawer()"><span>💬</span> الرسائل الخاصة</div>
     <div class="drawer-item" onclick="openProfileModal(); closeDrawer()"><span>⚙️</span> تعديل حسابي</div>
@@ -905,6 +931,25 @@ window.showToast=function(msg,type){const c=document.getElementById("toastContai
       <div id="trackingList"><div class="loading-wrap"><div class="spinner"></div></div></div>
     </div>
 
+    <div class="admin-page" id="page-notes">
+      <div class="sec-header">
+        <div class="sec-title">📝 ملاحظات الأعضاء</div>
+      </div>
+      <div style="background:var(--surface); border:1px solid var(--border); border-radius:var(--r); overflow-x:auto;">
+        <table style="width:100%; border-collapse:collapse; text-align:right;">
+          <thead>
+            <tr style="background:var(--surface2); border-bottom:1px solid var(--border);">
+              <th style="padding:12px; font-size:12px; color:var(--text-muted);">المهمة</th>
+              <th style="padding:12px; font-size:12px; color:var(--text-muted);">الكاتب</th>
+              <th style="padding:12px; font-size:12px; color:var(--text-muted);">الملاحظة</th>
+            </tr>
+          </thead>
+          <tbody id="adminNotesTableBody">
+             </tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="admin-page" id="page-members">
       <div class="sec-header">
         <div class="sec-title">👥 إدارة الأعضاء</div>
@@ -918,12 +963,12 @@ window.showToast=function(msg,type){const c=document.getElementById("toastContai
     <button class="bottom-nav-btn active" onclick="showAdminTab('overview')"><div class="nav-icon">📊</div>عامة</button>
     <button class="bottom-nav-btn" onclick="showAdminTab('send')"><div class="nav-icon">📤</div>إرسال</button>
     <button class="bottom-nav-btn" onclick="showAdminTab('tracking')"><div class="nav-icon">👁</div>الرصد</button>
+    <button class="bottom-nav-btn" onclick="showAdminTab('notes')"><div class="nav-icon">📝</div>الملاحظات</button>
     <button class="bottom-nav-btn" onclick="showAdminTab('members')"><div class="nav-icon">👥</div>الأعضاء</button>
   </div>
 </div>
 
 <div class="screen" id="screen-member">
-
   <div class="drawer-overlay" id="memberDrawerOverlay" onclick="closeMemberDrawer()"></div>
   <div class="drawer" id="memberDrawer">
     <div class="drawer-header">
@@ -948,7 +993,7 @@ window.showToast=function(msg,type){const c=document.getElementById("toastContai
     <div class="menu-btn" onclick="openMemberDrawer()">☰</div>
   </div>
 
-  <div style="padding:12px 16px 0; flex-shrink:0">
+  <div style="padding:12px 16px 0; flex-shrink:0;">
     <div class="filter-tabs">
       <button class="filter-btn active" onclick="filterMemberTasks('all',this)">📋 جميع المهام</button>
       <button class="filter-btn" onclick="filterMemberTasks('urgent',this)">⚡ عاجلة</button>
