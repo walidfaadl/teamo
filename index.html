@@ -1,1002 +1,123 @@
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>MOTS</title>
-<link rel="manifest" href="/manifest.json">
-<meta name="theme-color" content="#0a0a0f">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<link rel="stylesheet" href="style.css">
-
-<script type="module">
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged, updatePassword }
-  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc,
-  getDocs, query, where, orderBy, onSnapshot, serverTimestamp, getDoc, setDoc }
-  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-import { getStorage, ref, uploadBytes, getDownloadURL }
-  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
-import { getMessaging, getToken, onMessage }
-  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-messaging.js";
-
-const FIREBASE_CONFIG = {
-  apiKey:            "AIzaSyC-CeTBjIWZnUaaNlrdyb3qO-VNsdHGpt4",
-  authDomain:        "teams-5365d.firebaseapp.com",
-  projectId:         "teams-5365d",
-  storageBucket:     "teams-5365d.firebasestorage.app",
-  messagingSenderId: "742941957180",
-  appId:             "1:742941957180:web:b30056b3cdf9e6cefcf739"
-};
-const WEB_API_KEY = "AIzaSyC-CeTBjIWZnUaaNlrdyb3qO-VNsdHGpt4";
-// ← استبدل هذا بـ VAPID Key من Firebase Console > Project Settings > Cloud Messaging > Web Push certificates
-const VAPID_KEY = "BPALfUh3HzdxfkddldiOOcgHF7WQcMukbo6ARKIjCnDasf_WCqLsGQMy7zJnrrSBBoby27SsbRlxFenIVOUDW_U";
-
-const app     = initializeApp(FIREBASE_CONFIG);
-const auth    = getAuth(app);
-const db      = getFirestore(app);
-const storage = getStorage(app);
-let messaging = null;
-try { messaging = getMessaging(app); } catch(e) {}
-
-let currentUser = null, currentRole = null, unsubListeners = [];
-let audioCtx = null;
-// ✅ FIX: متغير لمنع إعادة فتح المودال الحرج بعد الإقرار
-let criticalAcknowledged = new Set();
-
-/* ══ AUDIO ══ */
-function playAlertSound() {
-  try {
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    if (audioCtx.state === 'suspended') audioCtx.resume();
-    [0, 200, 400].forEach(delay => {
-      setTimeout(() => {
-        const o = audioCtx.createOscillator(), g = audioCtx.createGain();
-        o.type = 'sine';
-        o.frequency.setValueAtTime(880, audioCtx.currentTime);
-        o.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + 0.2);
-        g.gain.setValueAtTime(0.4, audioCtx.currentTime);
-        g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
-        o.connect(g); g.connect(audioCtx.destination);
-        o.start(); o.stop(audioCtx.currentTime + 0.3);
-      }, delay);
-    });
-  } catch(e) {}
-}
-
-/* ══ PWA SERVICE WORKER ══ */
-async function initPWA(userId) {
-  if (!('serviceWorker' in navigator)) return;
-  try {
-    const reg = await navigator.serviceWorker.register('/firebase-messaging-sw.js');
-    if (!messaging || VAPID_KEY === 'YOUR_VAPID_KEY_HERE') return;
-    const permission = await Notification.requestPermission();
-    if (permission !== 'granted') return;
-    const token = await getToken(messaging, { vapidKey: VAPID_KEY, serviceWorkerRegistration: reg });
-    if (token) {
-      await updateDoc(doc(db, "users", userId), { fcmToken: token });
-      console.log('✅ FCM Token saved');
-    }
-  } catch(e) { console.warn('PWA init:', e); }
-}
-
-/* ══ AUTH ══ */
-onAuthStateChanged(auth, async (user) => {
-  if (user) {
-    currentUser = user;
-    const snap = await getDoc(doc(db, "users", user.uid));
-    if (!snap.exists()) { await signOut(auth); return; }
-    const data = snap.data();
-    currentRole = data.role;
-    window._userData = data;
-    criticalAcknowledged = new Set(); // reset on login
-
-    try { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {}
-
-    // تفعيل PWA للتنبيهات
-    initPWA(user.uid);
-
-    // تنبيه في المقدمة
-    if (messaging) {
-      onMessage(messaging, (payload) => {
-        const isCrit = payload.data?.type === 'critical';
-        if (isCrit) {
-          showToast(`🚨 ${payload.notification?.title || 'تنبيه حرج'}`, 'error');
-        } else {
-          showToast(`📩 ${payload.notification?.title || 'توجيه جديد'}`, 'warning');
-        }
-        playAlertSound();
-      });
-    }
-
-    if (currentRole === "admin") {
-      showScreen("screen-admin");
-      startAdminListeners();
-      document.getElementById("adminUserName").textContent = data.name || "المدير";
-      document.getElementById("adminAvatar").textContent   = (data.name || "م")[0];
-    } else {
-      showScreen("screen-member");
-      startMemberListeners();
-      document.getElementById("drawerMemberName").textContent   = data.name || "عضو";
-      document.getElementById("drawerMemberDept").textContent   = data.department || "عام";
-      document.getElementById("drawerMemberAvatar").textContent = (data.name || "أ")[0];
-      document.getElementById("memberAvatar").textContent       = (data.name || "أ")[0];
-      // ✅ FIX: إخفاء اسم المستخدم من topbar واستبداله بنص واضح
-      const nameEl = document.getElementById("memberTopName");
-      if (nameEl) nameEl.textContent = data.name || "عضو";
-    }
-  } else {
-    currentUser = null; currentRole = null; window._userData = null;
-    unsubListeners.forEach(u => u()); unsubListeners = [];
-    showScreen("screen-login");
-  }
-});
-
-window.doLogin = async function() {
-  const email = document.getElementById("loginEmail").value.trim();
-  const pass  = document.getElementById("loginPass").value;
-  const err   = document.getElementById("loginError");
-  err.style.display = "none";
-  const btn = document.getElementById("btnLogin");
-  btn.disabled = true; btn.textContent = "⏳ جاري...";
-  try {
-    await signInWithEmailAndPassword(auth, email, pass);
-    showToast("✅ مرحباً!", "success");
-  } catch(e) {
-    err.style.display = "block";
-    err.textContent = "بيانات الدخول غير صحيحة";
-  }
-  btn.disabled = false; btn.textContent = "دخول";
-};
-
-window.logout = async function() {
-  document.querySelectorAll(".drawer-overlay").forEach(e => e.classList.remove("open"));
-  document.querySelectorAll(".drawer").forEach(e => e.classList.remove("open"));
-  await signOut(auth);
-};
-
-/* ══ DRAWERS ══ */
-window.openDrawer      = () => { document.getElementById("drawer").classList.add("open"); document.getElementById("drawerOverlay").classList.add("open"); };
-window.closeDrawer     = () => { document.getElementById("drawer").classList.remove("open"); document.getElementById("drawerOverlay").classList.remove("open"); };
-window.openMemberDrawer  = () => { document.getElementById("memberDrawer").classList.add("open"); document.getElementById("memberDrawerOverlay").classList.add("open"); };
-window.closeMemberDrawer = () => { document.getElementById("memberDrawer").classList.remove("open"); document.getElementById("memberDrawerOverlay").classList.remove("open"); };
-
-/* ══ ADMIN LISTENERS ══ */
-function startAdminListeners() {
-  const u = onSnapshot(query(collection(db, "tasks"), orderBy("createdAt", "desc")), snap => {
-    const tasks = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    window._allTasks = tasks;
-    renderAdminTasks(tasks);
-    document.getElementById("statTotal").textContent   = tasks.length;
-    document.getElementById("statPending").textContent = tasks.filter(t => t.status === "pending").length;
-    document.getElementById("statDone").textContent    = tasks.filter(t => t.status === "completed").length;
-    if (window._allAssignments) renderNotesTable(window._allAssignments);
-  });
-  unsubListeners.push(u);
-
-  const u2 = onSnapshot(query(collection(db, "taskAssignments"), orderBy("notifSentAt", "desc")), snap => {
-    window._allAssignments = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    renderTracking(window._allAssignments);
-    renderNotesTable(window._allAssignments);
-  });
-  unsubListeners.push(u2);
-  loadMembers();
-}
-
-async function loadMembers() {
-  try {
-    const snap = await getDocs(query(collection(db, "users"), orderBy("createdAt", "desc")));
-    window._members = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    const membersOnly = window._members.filter(m => m.role === "member");
-    const el = document.getElementById("statMembers");
-    if (el) el.textContent = membersOnly.length;
-    renderRecipients(membersOnly);
-    renderMembersTable(window._members);
-  } catch(e) { console.error(e); }
-}
-
-/* ══ MEMBER MANAGEMENT ══ */
-window.createMember = async function() {
-  const name = document.getElementById("mName").value.trim();
-  const email = document.getElementById("mEmail").value.trim();
-  const password = document.getElementById("mPassword").value;
-  const role = document.getElementById("mRole").value;
-  const department = document.getElementById("mDept").value;
-  if (!name || !email || !password) { showToast("⚠️ أدخل جميع البيانات", "warning"); return; }
-  if (password.length < 6) { showToast("⚠️ كلمة المرور 6 أحرف على الأقل", "warning"); return; }
-  const btn = document.getElementById("btnCreateMember");
-  btn.disabled = true; btn.textContent = "⏳ جاري...";
-  try {
-    const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${WEB_API_KEY}`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password, returnSecureToken: true })
-    });
-    const data = await res.json();
-    if (data.error) { showToast("❌ " + (data.error.message === "EMAIL_EXISTS" ? "البريد مستخدم" : data.error.message), "error"); btn.disabled = false; btn.textContent = "إضافة"; return; }
-    await setDoc(doc(db, "users", data.localId), { name, email, role, department, isActive: true, fcmToken: "pending", createdAt: serverTimestamp(), createdBy: currentUser.uid });
-    showToast(`✅ تم إضافة ${name}`, "success");
-    closeMemberModal(); loadMembers();
-  } catch(e) { showToast("❌ " + e.message, "error"); }
-  btn.disabled = false; btn.textContent = "إضافة";
-};
-
-function renderMembersTable(members) {
-  const list = document.getElementById("membersList");
-  if (!members.length) { list.innerHTML = `<div class="empty-card">👥<br>لا يوجد أعضاء بعد</div>`; return; }
-  list.innerHTML = members.map(m => `
-    <div class="member-item">
-      <div class="member-item-avatar">${(m.name || "م")[0]}</div>
-      <div class="member-item-info">
-        <div class="member-item-name">${m.name || "—"} <span style="font-size:10px;color:var(--text-muted)">(${m.department || "عام"})</span></div>
-        <div class="member-item-email">${m.email || "—"}</div>
-      </div>
-      <div class="member-item-badges">
-        <span class="chip ${m.role === "admin" ? "chip-purple" : "chip-blue"}">${m.role === "admin" ? "مدير" : "عضو"}</span>
-        <span class="chip ${m.isActive ? "chip-green" : "chip-gray"}">${m.isActive ? "نشط" : "معطّل"}</span>
-      </div>
-      <div class="member-item-actions">
-        <button class="icon-btn" onclick="editMember('${m.id}','${(m.name||"").replace(/'/g,"\\'")}','${m.email}','${m.role}','${m.department||"عام"}')">✏️</button>
-        <button class="icon-btn ${m.isActive?"warn":"ok"}" onclick="toggleMember('${m.id}',${m.isActive})">${m.isActive ? "🔒" : "✅"}</button>
-        ${m.role !== "admin" ? `<button class="icon-btn danger" onclick="deleteMember('${m.id}','${(m.name||"").replace(/'/g,"\\'")}')">🗑️</button>` : ""}
-      </div>
-    </div>`).join("");
-}
-
-window.toggleMember = async function(uid, cur) {
-  try { await updateDoc(doc(db, "users", uid), { isActive: !cur }); showToast(cur ? "🔒 تعطيل" : "✅ تفعيل", "success"); loadMembers(); } catch(e) {}
-};
-window.deleteMember = async function(uid, name) {
-  if (!confirm(`حذف ${name}؟`)) return;
-  try { await deleteDoc(doc(db, "users", uid)); showToast("🗑️ تم الحذف", "success"); loadMembers(); } catch(e) {}
-};
-window.editMember = function(uid, name, email, role, dept) {
-  document.getElementById("mName").value = name;
-  document.getElementById("mEmail").value = email;
-  document.getElementById("mRole").value = role;
-  document.getElementById("mDept").value = dept || "عام";
-  document.getElementById("mPassword").value = "";
-  document.getElementById("memberModalTitle").textContent = "تعديل العضو";
-  document.getElementById("btnCreateMember").textContent = "حفظ";
-  document.getElementById("btnCreateMember").onclick = () => updateMember(uid);
-  openMemberModal();
-};
-window.updateMember = async function(uid) {
-  const name = document.getElementById("mName").value.trim();
-  const role = document.getElementById("mRole").value;
-  const department = document.getElementById("mDept").value;
-  if (!name) { showToast("⚠️ أدخل الاسم", "warning"); return; }
-  try { await updateDoc(doc(db, "users", uid), { name, role, department }); showToast("✅ تم التحديث", "success"); closeMemberModal(); loadMembers(); } catch(e) {}
-};
-window.openMemberModal = () => document.getElementById("memberModal").classList.add("visible");
-window.openNewMemberModal = function() {
-  ["mName","mEmail","mPassword"].forEach(id => document.getElementById(id).value = "");
-  document.getElementById("mRole").value = "member";
-  document.getElementById("mDept").value = "عام";
-  document.getElementById("memberModalTitle").textContent = "عضو جديد";
-  document.getElementById("btnCreateMember").textContent = "إضافة";
-  document.getElementById("btnCreateMember").onclick = createMember;
-  openMemberModal();
-};
-window.closeMemberModal = () => document.getElementById("memberModal").classList.remove("visible");
-
-/* ══ SEND TASK ══ */
-window.sendTask = async function(editTaskId = null) {
-  const title = document.getElementById("fTitle").value.trim();
-  const content = document.getElementById("fContent").value.trim();
-  const category = document.getElementById("fCategory").value;
-  const notifType = document.getElementById("fNotifType").value;
-  const priority = window._selectedPriority || "عاجل";
-  const fileInput = document.getElementById("fFile").files[0];
-  const recipients = [...(window._selectedRecipients || [])];
-  if (!title || !content) { showToast("⚠️ أدخل العنوان والنص", "warning"); return; }
-  if (!editTaskId && !recipients.length) { showToast("⚠️ اختر مستلماً", "warning"); return; }
-  const btn = document.getElementById("btnSend");
-  btn.disabled = true; btn.textContent = "⏳ جاري...";
-  try {
-    let fileUrl = window._editFileUrl || null;
-    if (fileInput) {
-      const fileRef = ref(storage, `tasks/${Date.now()}_${fileInput.name}`);
-      await uploadBytes(fileRef, fileInput);
-      fileUrl = await getDownloadURL(fileRef);
-    }
-    const taskData = { title, content, category, priority, notifType, fileUrl: fileUrl || null, status: "pending" };
-    if (editTaskId) {
-      await updateDoc(doc(db, "tasks", editTaskId), taskData);
-      showToast("✅ تم التعديل", "success");
-    } else {
-      taskData.recipients = recipients; taskData.createdBy = currentUser.uid; taskData.createdAt = serverTimestamp();
-      const taskRef = await addDoc(collection(db, "tasks"), taskData);
-      for (const uid of recipients) {
-        await addDoc(collection(db, "taskAssignments"), {
-          taskId: taskRef.id, userId: uid, notifSentAt: serverTimestamp(),
-          notifDeliveredAt: null, openedAt: null, acknowledgedAt: null,
-          status: "pending", statusUpdatedAt: serverTimestamp(), note: ""
-        });
-      }
-      showToast(notifType === "critical" ? `🚨 تم الإرسال الحرج إلى ${recipients.length} أعضاء` : `✅ تم الإرسال إلى ${recipients.length} أعضاء`, "success");
-    }
-    document.getElementById("fTitle").value = "";
-    document.getElementById("fContent").value = "";
-    document.getElementById("fFile").value = "";
-    window._editFileUrl = null;
-    window.selectNone();
-    showAdminTab("overview");
-    btn.textContent = "📤 إرسال التوجيه";
-    btn.onclick = () => sendTask();
-  } catch(e) { showToast("❌ " + e.message, "error"); }
-  btn.disabled = false;
-};
-
-window.editAdminTask = function(id, title, content, priority, fileUrl) {
-  document.getElementById("fTitle").value = title;
-  document.getElementById("fContent").value = content;
-  window._editFileUrl = fileUrl !== "null" ? fileUrl : null;
-  window._selectedPriority = priority;
-  document.querySelectorAll(".pri-btn").forEach(b => b.classList.toggle("active", b.dataset.p === priority));
-  const btn = document.getElementById("btnSend");
-  btn.textContent = "💾 حفظ التعديل";
-  btn.onclick = () => sendTask(id);
-  showAdminTab("send");
-};
-window.deleteAdminTask = async function(id) {
-  if (confirm("حذف هذا التوجيه؟")) { await deleteDoc(doc(db, "tasks", id)); showToast("🗑️ تم الحذف", "success"); }
-};
-
-/* ══ MEMBER PORTAL ══ */
-window._memberTasksMap = {};
-let isFirstTaskLoad = true;
-
-function startMemberListeners() {
-  loadMembers();
-  const u = onSnapshot(query(collection(db, "taskAssignments"), where("userId", "==", currentUser.uid)), async snap => {
-    const assignments = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-
-    // ✅ FIX: تحديث عداد المهام غير المقروءة فقط
-    const unread = assignments.filter(a => !a.openedAt).length;
-    const badge = document.getElementById("memberBadge");
-    if (badge) { badge.textContent = unread; badge.style.display = unread > 0 ? "flex" : "none"; }
-
-    await renderMemberTasks(assignments, window._currentFilter || "all");
-
-    if (!isFirstTaskLoad) {
-      const hasNew = snap.docChanges().some(c => c.type === "added");
-      if (hasNew) playAlertSound();
-    }
-    isFirstTaskLoad = false;
-
-    // ✅ FIX: تحقق من التنبيهات الحرجة مع تجاهل ما تم الإقرار به محلياً
-    for (const a of assignments) {
-      if (a.acknowledgedAt) continue;          // مُقرّ به في Firestore
-      if (criticalAcknowledged.has(a.id)) continue; // مُقرّ به محلياً في هذه الجلسة
-      try {
-        const ts = await getDoc(doc(db, "tasks", a.taskId));
-        if (ts.exists() && ts.data().notifType === "critical") {
-          showCriticalModal(ts.data(), a.id);
-          break;
-        }
-      } catch(e) {}
-    }
-  });
-  unsubListeners.push(u);
-}
-
-window._currentFilter = "all";
-async function renderMemberTasks(assignments, filter) {
-  window._currentFilter = filter;
-  const list = document.getElementById("memberTaskList");
-  const tasksData = [];
-  for (const a of assignments) {
-    try {
-      const ts = await getDoc(doc(db, "tasks", a.taskId));
-      if (ts.exists()) { const t = { id: ts.id, ...ts.data() }; tasksData.push({ a, t }); window._memberTasksMap[a.id] = { a, t }; }
-    } catch(e) {}
-  }
-  let filtered = tasksData;
-  if (filter === "urgent") filtered = tasksData.filter(x => x.t.priority === "عاجل");
-  else if (filter === "done") filtered = tasksData.filter(x => x.a.status === "completed");
-  filtered.sort((x, y) => (y.t.createdAt?.toMillis() || 0) - (x.t.createdAt?.toMillis() || 0));
-  if (!filtered.length) { list.innerHTML = `<div class="empty-card">📭<br>لا توجد مهام هنا</div>`; return; }
-  list.innerHTML = filtered.map(({ a, t }) => {
-    const isUnread = !a.openedAt, isCrit = t.notifType === "critical";
-    const pb = t.priority === "عاجل" ? "chip-red" : t.priority === "مهم" ? "chip-orange" : "chip-blue";
-    const cb = t.category === "متابعة عاجلة" ? "chip-red" : t.category === "حملات إعلامية" ? "chip-purple" : "chip-blue";
-    const ts2 = t.createdAt?.toDate ? t.createdAt.toDate().toLocaleTimeString("ar", { hour: "2-digit", minute: "2-digit" }) : "—";
-    const sl = a.status === "pending" ? "معلق" : a.status === "in_progress" ? "جاري" : "مكتمل";
-    const sc = a.status === "pending" ? "chip-gray" : a.status === "in_progress" ? "chip-orange" : "chip-green";
-    const countdown = a.status !== "completed" ? window.buildCountdown(t.targetDeadline) : "";
-    return `<div class="task-card ${isUnread ? "unread" : ""} ${isCrit ? "critical" : ""}" onclick="openTaskDetailsModal('${a.id}')">
-      <div class="task-card-top">
-        <div class="task-chips">
-          ${isCrit ? '<span class="chip chip-red">🚨 حرج</span>' : ""}
-          <span class="chip ${pb}">${t.priority}</span>
-          <span class="chip ${cb}">${t.category}</span>
-          <span class="chip ${sc}">${sl}</span>
-          ${isUnread ? '<span class="chip chip-accent">جديد</span>' : ""}
-        </div>
-        <span class="task-time">${ts2}</span>
-      </div>
-      <div class="task-title">${t.title}</div>
-      ${countdown ? `<div style="margin-top:8px">${countdown}</div>` : ""}
-    </div>`;
-  }).join("");
-}
-
-window.openTaskDetailsModal = async function(assignmentId) {
-  const data = window._memberTasksMap[assignmentId];
-  if (!data) return;
-  window._currentOpenTaskId = assignmentId;
-  if (!data.a.openedAt) { try { await updateDoc(doc(db, "taskAssignments", assignmentId), { openedAt: serverTimestamp() }); } catch(e) {} }
-  document.getElementById("tdTitle").textContent = data.t.title;
-  document.getElementById("tdContent").innerHTML = (data.t.content || "").replace(/\n/g, "<br>");
-  document.getElementById("tdNote").value = data.a.note || "";
-  document.getElementById("tdStatus").value = data.a.status || "pending";
-  const fileCont = document.getElementById("tdFileContainer");
-  fileCont.innerHTML = data.t.fileUrl ? `<a href="${data.t.fileUrl}" target="_blank" class="chip chip-blue" style="text-decoration:none;padding:8px 14px;font-size:13px;display:inline-block;">📎 تحميل الملف المرفق</a>` : "";
-  document.getElementById("taskDetailsModal").classList.add("visible");
-};
-window.closeTaskDetailsModal = () => document.getElementById("taskDetailsModal").classList.remove("visible");
-window.saveTaskDetails = async function() {
-  const id = window._currentOpenTaskId;
-  const status = document.getElementById("tdStatus").value;
-  const note = document.getElementById("tdNote").value.trim();
-  const btn = document.getElementById("btnSaveTaskDetails");
-  btn.textContent = "⏳ جاري..."; btn.disabled = true;
-  try { await updateDoc(doc(db, "taskAssignments", id), { status, note, statusUpdatedAt: serverTimestamp() }); showToast("✅ تم الحفظ", "success"); closeTaskDetailsModal(); }
-  catch(e) { showToast("❌ خطأ", "error"); }
-  btn.textContent = "حفظ التعديلات"; btn.disabled = false;
-};
-window.filterMemberTasks = function(filter, el) {
-  document.querySelectorAll(".filter-btn").forEach(b => b.classList.remove("active"));
-  el.classList.add("active");
-  getDocs(query(collection(db, "taskAssignments"), where("userId", "==", currentUser.uid)))
-    .then(async s => { await renderMemberTasks(s.docs.map(d => ({ id: d.id, ...d.data() })), filter); });
-};
-
-/* ══ ✅ FIX: CRITICAL MODAL ══ */
-function showCriticalModal(task, assignmentId) {
-  // لا تعرض المودال إذا كان مُقرّاً به بالفعل في هذه الجلسة
-  if (criticalAcknowledged.has(assignmentId)) return;
-  document.getElementById("modalTaskTitle").textContent = task.title  || "";
-  document.getElementById("modalTaskText").textContent  = task.content || "";
-  document.getElementById("criticalModal").dataset.assignmentId = assignmentId || "";
-  document.getElementById("criticalModal").classList.add("visible");
-  playAlertSound();
-}
-
-window.acknowledgeAlert = async function() {
-  const id = document.getElementById("criticalModal").dataset.assignmentId;
-  if (id) {
-    // ✅ FIX: أضف للقائمة المحلية أولاً لمنع إعادة الظهور
-    criticalAcknowledged.add(id);
-    try {
-      await updateDoc(doc(db, "taskAssignments", id), {
-        acknowledgedAt: serverTimestamp(),
-        openedAt:       serverTimestamp(),
-        status:         "in_progress"
-      });
-    } catch(e) {}
-  }
-  document.getElementById("criticalModal").classList.remove("visible");
-  showToast("✅ تم الإقرار بالاستلام", "success");
-};
-
-window.closeModal = function() {
-  const id = document.getElementById("criticalModal").dataset.assignmentId;
-  if (id) criticalAcknowledged.add(id); // ✅ FIX: "لاحقاً" أيضاً يمنع إعادة الظهور في نفس الجلسة
-  document.getElementById("criticalModal").classList.remove("visible");
-};
-
-/* ══ ADMIN RENDER ══ */
-function renderAdminTasks(tasks) {
-  const list = document.getElementById("adminTaskList");
-  if (!tasks.length) { list.innerHTML = `<div class="empty-card">📋<br>لا توجد مهام بعد</div>`; return; }
-  list.innerHTML = tasks.map(t => {
-    const pb = t.priority === "عاجل" ? "chip-red" : t.priority === "مهم" ? "chip-orange" : "chip-blue";
-    const sb = t.status === "pending" ? "chip-gray" : t.status === "in_progress" ? "chip-orange" : "chip-green";
-    const sl = t.status === "pending" ? "معلق" : t.status === "in_progress" ? "جاري" : "مكتمل";
-    const ts = t.createdAt?.toDate ? t.createdAt.toDate().toLocaleTimeString("ar", { hour: "2-digit", minute: "2-digit" }) : "—";
-    const st = (t.title||"").replace(/'/g,"\\'"), sc = (t.content||"").replace(/'/g,"\\'");
-    const countdown = t.status !== "completed" ? window.buildCountdown(t.targetDeadline) : "";
-    return `<div class="task-card" style="cursor:pointer;" onclick="openAdminTaskDetails('${t.id}')">
-      <div class="task-card-top">
-        <div class="task-chips"><span class="chip ${pb}">${t.priority}</span><span class="chip ${sb}">${sl}</span></div>
-        <span class="task-time">${ts}</span>
-      </div>
-      <div class="task-title">${t.title}</div>
-      <div style="font-size:12px;color:var(--text-muted);margin-top:4px">${t.category} · ${(t.recipients||[]).length} مستلم</div>
-      ${countdown ? `<div style="margin-top:8px">${countdown}</div>` : ""}
-      <div class="task-footer" style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px;">
-        <button class="icon-btn" style="margin-left:6px" onclick="event.stopPropagation();editAdminTask('${t.id}','${st}','${sc}','${t.priority}','${t.fileUrl||null}')">✏️</button>
-        <button class="icon-btn danger" onclick="event.stopPropagation();deleteAdminTask('${t.id}')">🗑️</button>
-      </div>
-    </div>`;
-  }).join("");
-}
-
-window.openAdminTaskDetails = function(taskId) {
-  const task = (window._allTasks || []).find(x => x.id === taskId);
-  if (!task) return;
-  document.getElementById("adModalTitle").textContent = task.title;
-  let html = (task.content || "").replace(/\n/g, "<br>");
-  if (task.fileUrl) html += `<br><br><a href="${task.fileUrl}" target="_blank" class="chip chip-blue" style="text-decoration:none;">📎 الملف المرفق</a>`;
-  document.getElementById("adModalContent").innerHTML = html;
-  const assigns = (window._allAssignments || []).filter(a => a.taskId === taskId && a.note?.trim());
-  document.getElementById("adModalNotes").innerHTML = assigns.length
-    ? assigns.map(a => { const m = (window._members||[]).find(u => u.id === a.userId); return `<div style="background:var(--surface2);padding:10px;border-radius:8px;margin-bottom:8px;font-size:13px;line-height:1.5;"><strong style="color:var(--accent);display:block;margin-bottom:4px;">👤 ${m?.name||"عضو"}:</strong>${a.note}</div>`; }).join("")
-    : `<div style="font-size:12px;color:var(--text-muted);text-align:center;padding:10px;">لا توجد ملاحظات بعد.</div>`;
-  document.getElementById("adminTaskDetailsModal").classList.add("visible");
-};
-window.closeAdminTaskDetails = () => document.getElementById("adminTaskDetailsModal").classList.remove("visible");
-
-function renderNotesTable(assignments) {
-  const tbody = document.getElementById("adminNotesTableBody");
-  if (!tbody) return;
-  const notes = assignments.filter(a => a.note?.trim());
-  if (!notes.length) { tbody.innerHTML = `<tr><td colspan="3" style="text-align:center;padding:24px;color:var(--text-muted);font-size:13px;">لا توجد ملاحظات بعد</td></tr>`; return; }
-  tbody.innerHTML = notes.map(a => {
-    const task = (window._allTasks||[]).find(t => t.id === a.taskId);
-    const member = (window._members||[]).find(m => m.id === a.userId);
-    return `<tr><td style="padding:12px;font-size:13px;font-weight:600;">${task?.title||"—"}</td><td style="padding:12px;font-size:12px;color:var(--accent);white-space:nowrap;">${member?.name||"—"}</td><td style="padding:12px;font-size:13px;color:var(--text-muted);">${a.note}</td></tr>`;
-  }).join("");
-}
-
-function renderTracking(assignments) {
-  const list = document.getElementById("trackingList");
-  if (!assignments.length) { list.innerHTML = `<div class="empty-card">👁<br>لا توجد بيانات بعد</div>`; return; }
-  list.innerHTML = assignments.slice(0, 40).map(a => {
-    const member = (window._members||[]).find(m => m.id === a.userId);
-    const mn = member?.name || "عضو";
-    const sb = a.status==="pending"?"chip-gray":a.status==="in_progress"?"chip-orange":"chip-green";
-    const sl = a.status==="pending"?"معلق":a.status==="in_progress"?"جاري":"مكتمل";
-    const st = a.notifSentAt?.toDate ? a.notifSentAt.toDate().toLocaleTimeString("ar",{hour:"2-digit",minute:"2-digit"}) : "—";
-    const ot = a.openedAt?.toDate ? a.openedAt.toDate().toLocaleTimeString("ar",{hour:"2-digit",minute:"2-digit"}) : "—";
-    return `<div class="tracking-item" style="flex-direction:column;align-items:flex-start;">
-      <div style="display:flex;width:100%;align-items:center;gap:12px;">
-        <div class="tracking-avatar">${mn[0]}</div>
-        <div class="tracking-info">
-          <div class="tracking-name">${mn}</div>
-          <div class="tracking-meta"><span class="${a.notifSentAt?"dot-blue":"dot-gray"}"></span> وصل ${st} <span class="${a.openedAt?"dot-green":"dot-gray"}" style="margin-right:8px"></span> فُتح ${ot}</div>
-        </div>
-        <span class="chip ${sb}">${sl}</span>
-      </div>
-      ${a.note ? `<div style="margin-top:8px;padding:6px 10px;background:var(--surface2);border-radius:6px;font-size:12px;color:var(--accent);width:100%;">💬 ${a.note}</div>` : ""}
-    </div>`;
-  }).join("");
-}
-
-/* ══ RECIPIENTS ══ */
-window._selectedRecipients = new Set(); window._selectedPriority = "عاجل";
-function renderRecipients(members) {
-  const grid = document.getElementById("recipientsGrid");
-  if (!members?.length) { grid.innerHTML = `<div style="font-size:13px;color:var(--text-muted);padding:8px;text-align:center">لا يوجد أعضاء — <button class="text-btn" onclick="showAdminTab('members')">أضف أعضاء أولاً</button></div>`; return; }
-  grid.innerHTML = members.map(m => `
-    <div class="recip-chip" id="chip_${m.id}" onclick="toggleRecipient('${m.id}')">
-      <div class="recip-avatar">${(m.name||"م")[0]}</div>
-      <div class="recip-name">${m.name||m.email} <span style="font-size:10px;color:var(--text-muted)">(${m.department||"عام"})</span></div>
-      <div class="recip-check" id="chk_${m.id}"></div>
-    </div>`).join("");
-}
-window.toggleRecipient = function(id) {
-  const c = document.getElementById("chip_"+id), k = document.getElementById("chk_"+id);
-  if (window._selectedRecipients.has(id)) { window._selectedRecipients.delete(id); c.classList.remove("selected"); k.textContent=""; }
-  else { window._selectedRecipients.add(id); c.classList.add("selected"); k.textContent="✓"; }
-};
-window.selectAll  = () => { (window._members||[]).filter(m=>m.role==="member").forEach(m=>{window._selectedRecipients.add(m.id);const c=document.getElementById("chip_"+m.id),k=document.getElementById("chk_"+m.id);if(c){c.classList.add("selected");k.textContent="✓";}}); };
-window.selectNone = () => { window._selectedRecipients.clear(); document.querySelectorAll(".recip-chip").forEach(c=>c.classList.remove("selected")); document.querySelectorAll(".recip-check").forEach(c=>c.textContent=""); };
-window.filterRecipientsByDept = function(dept) { selectNone(); if(!dept)return; (window._members||[]).filter(m=>m.department===dept&&m.role==="member").forEach(m=>toggleRecipient(m.id)); };
-window.setPriority = function(el) { document.querySelectorAll(".pri-btn").forEach(b=>b.classList.remove("active")); el.classList.add("active"); window._selectedPriority=el.dataset.p; };
-
-/* ══ ✅ FIX: CHAT ══ */
-window.openChatModal = function() {
-  document.getElementById("chatModal").classList.add("visible");
-  document.getElementById("chatArea").style.display = "none";
-  loadChatUsers();
-};
-window.closeChatModal = function() {
-  document.getElementById("chatModal").classList.remove("visible");
-  if (window._chatUnsub) { window._chatUnsub(); window._chatUnsub = null; }
-};
-
-function loadChatUsers() {
-  const list = document.getElementById("chatUsersList");
-  if (!window._members || !window._members.length) {
-    list.innerHTML = `<div style="font-size:13px;color:var(--text-muted);text-align:center;padding:20px;">⏳ جاري تحميل المستخدمين...</div>`;
-    // انتظر تحميل الأعضاء
-    getDocs(query(collection(db,"users"))).then(snap => {
-      window._members = snap.docs.map(d=>({id:d.id,...d.data()}));
-      renderChatUsers();
-    });
-    return;
-  }
-  renderChatUsers();
-}
-
-function renderChatUsers() {
-  const list = document.getElementById("chatUsersList");
-  // ✅ FIX: اعرض كل المستخدمين ما عدا المستخدم الحالي
-  const users = (window._members||[]).filter(u => u.id !== currentUser?.uid);
-  if (!users.length) { list.innerHTML = `<div style="font-size:13px;color:var(--text-muted);text-align:center;padding:20px;">لا يوجد مستخدمون آخرون</div>`; return; }
-  list.innerHTML = users.map(u => `
-    <div class="chat-user-item" onclick="openChatWith('${u.id}','${(u.name||"").replace(/'/g,"\\'")}')">
-      <span style="font-size:16px;font-weight:600;">${u.name||u.email}</span>
-      <span style="font-size:11px;color:var(--text-muted);margin-right:6px;">${u.role==="admin"?"🛡️ مدير":"👤 "+( u.department||"عام")}</span>
-    </div>`).join("");
-}
-
-let isFirstChatLoad = true;
-window.openChatWith = function(uid, name) {
-  window._currentChatUser = uid;
-  document.getElementById("chatTitle").textContent = "💬 " + name;
-  document.getElementById("chatArea").style.display = "flex";
-  if (window._chatUnsub) window._chatUnsub();
-  isFirstChatLoad = true;
-  const chatId = currentUser.uid < uid ? `${currentUser.uid}_${uid}` : `${uid}_${currentUser.uid}`;
-  window._chatUnsub = onSnapshot(
-    query(collection(db, "messages"), where("chatId", "==", chatId)),
-    snap => {
-      let msgs = snap.docs.map(d => d.data());
-      msgs.sort((a, b) => (a.createdAt?.toMillis?.() || 0) - (b.createdAt?.toMillis?.() || 0));
-      const container = document.getElementById("chatMessages");
-      container.innerHTML = msgs.map(m =>
-        `<div style="margin-bottom:8px;text-align:${m.senderId===currentUser.uid?"left":"right"};">
-          <span style="background:${m.senderId===currentUser.uid?"var(--accent)":"var(--surface2)"};color:${m.senderId===currentUser.uid?"#000":"#fff"};padding:8px 12px;border-radius:12px;display:inline-block;font-size:13px;max-width:85%;word-wrap:break-word;">${m.text}</span>
-        </div>`).join("");
-      container.scrollTop = container.scrollHeight;
-      if (!isFirstChatLoad) {
-        const hasNew = snap.docChanges().some(c => c.type==="added" && c.doc.data().senderId !== currentUser.uid);
-        if (hasNew) playAlertSound();
-      }
-      isFirstChatLoad = false;
-    },
-    error => { console.error("Chat error:", error.message); }
-  );
-};
-
-window.sendChatMessage = async function() {
-  const input = document.getElementById("chatInput");
-  const text = input.value.trim();
-  if (!text || !window._currentChatUser) return;
-  const uid = window._currentChatUser;
-  const chatId = currentUser.uid < uid ? `${currentUser.uid}_${uid}` : `${uid}_${currentUser.uid}`;
-  input.value = "";
-  try { await addDoc(collection(db, "messages"), { chatId, senderId: currentUser.uid, receiverId: uid, text, createdAt: serverTimestamp() }); }
-  catch(e) { showToast("❌ فشل الإرسال", "error"); }
-};
-
-/* ══ PROFILE ══ */
-window.openProfileModal = function() {
-  document.getElementById("myProfileName").value = window._userData?.name || "";
-  document.getElementById("myProfilePass").value = "";
-  document.getElementById("profileModal").classList.add("visible");
-};
-window.closeProfileModal = () => document.getElementById("profileModal").classList.remove("visible");
-window.updateMyProfile = async function() {
-  const name = document.getElementById("myProfileName").value.trim();
-  const pass = document.getElementById("myProfilePass").value;
-  try {
-    if (name) await updateDoc(doc(db, "users", currentUser.uid), { name });
-    if (pass.length >= 6) await updatePassword(currentUser, pass);
-    showToast("✅ تم تحديث بياناتك", "success");
-    closeProfileModal();
-  } catch(e) { showToast("❌ فشل — أعد تسجيل الدخول وحاول مجدداً", "error"); }
-};
-
-/* ══ NAV ══ */
-window.showAdminTab = function(tab) {
-  document.querySelectorAll(".admin-page").forEach(p => p.classList.remove("active"));
-  document.getElementById("page-"+tab).classList.add("active");
-  document.querySelectorAll(".bottom-nav-btn").forEach(b => b.classList.remove("active"));
-  const map = { overview:0, send:1, tracking:2, notes:3, members:4 };
-  document.querySelectorAll(".bottom-nav-btn")[map[tab]]?.classList.add("active");
-  closeDrawer();
-  if (tab === "members") loadMembers();
-};
-window.showScreen = id => { document.querySelectorAll(".screen").forEach(s => s.classList.remove("active")); document.getElementById(id).classList.add("active"); };
-window.showToast = function(msg, type) {
-  const c = document.getElementById("toastContainer"), t = document.createElement("div");
-  t.className = `toast ${type||""}`; t.innerHTML = msg; c.appendChild(t);
-  setTimeout(() => { t.style.opacity="0"; t.style.transition="all .3s"; setTimeout(()=>t.remove(),300); }, 3000);
-};
-
-/* ══ COUNTDOWN TIMERS ══ */
-function formatCountdown(ms) {
-  if (ms <= 0) return { text: "انتهى الوقت !", cls: "expired" };
-  const h = Math.floor(ms / 3600000);
-  const m = Math.floor((ms % 3600000) / 60000);
-  const s = Math.floor((ms % 60000) / 1000);
-  const cls = ms < 1800000 ? "urgent" : ms < 10800000 ? "warning" : "normal";
-  const text = h > 0 ? `${h}س ${m}د` : m > 0 ? `${m}د ${s}ث` : `${s}ث`;
-  return { text, cls };
-}
-setInterval(() => {
-  document.querySelectorAll("[data-deadline]").forEach(el => {
-    const ms = parseInt(el.dataset.deadline) - Date.now();
-    const { text, cls } = formatCountdown(ms);
-    el.textContent = "⏱ " + text;
-    el.className = "countdown-wrap " + cls;
-  });
-}, 1000);
-window.buildCountdown = function(deadline) {
-  if (!deadline) return "";
-  const ts = deadline?.toMillis ? deadline.toMillis() : (deadline instanceof Date ? deadline.getTime() : null);
-  if (!ts) return "";
-  const { text, cls } = formatCountdown(ts - Date.now());
-  return `<span class="countdown-wrap ${cls}" data-deadline="${ts}">⏱ ${text}</span>`;
-};
-</script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>نبض | منصة الأخبار الذكية</title>
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-<div class="toast-container" id="toastContainer"></div>
-
-<!-- TASK DETAILS (عضو) -->
-<div class="modal-overlay" id="taskDetailsModal">
-  <div class="modal-sheet">
-    <div id="tdTitle" style="font-size:18px;font-weight:bold;margin-bottom:12px;color:var(--accent);border-bottom:1px solid var(--border);padding-bottom:10px;"></div>
-    <div id="tdContent" style="font-size:14px;color:var(--text-muted);margin-bottom:15px;line-height:1.6;max-height:35vh;overflow-y:auto;"></div>
-    <div id="tdFileContainer" style="margin-bottom:15px;"></div>
-    <div style="background:var(--surface2);padding:12px;border-radius:var(--r-sm);margin-bottom:15px;">
-      <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:8px;">ملاحظة للإدارة (اختياري)</label>
-      <textarea id="tdNote" style="width:100%;background:var(--surface);border:1px solid var(--border);color:#fff;padding:10px;border-radius:8px;resize:vertical;min-height:60px;font-family:inherit;font-size:13px;outline:none;" placeholder="ملاحظاتك تصل للمدير..."></textarea>
-    </div>
-    <div style="display:flex;gap:10px;align-items:center;margin-bottom:15px;">
-      <label style="font-size:13px;color:var(--text-muted);white-space:nowrap;">الحالة:</label>
-      <select id="tdStatus" style="flex:1;padding:10px;background:var(--surface2);border:1px solid var(--border);color:#fff;border-radius:var(--r-sm);outline:none;font-family:inherit;">
-        <option value="pending">⏳ معلق</option>
-        <option value="in_progress">⚡ جاري التنفيذ</option>
-        <option value="completed">✅ مكتملة</option>
-      </select>
-    </div>
-    <div class="modal-form-btns">
-      <button class="modal-cancel" onclick="closeTaskDetailsModal()">إغلاق</button>
-      <button class="modal-confirm" id="btnSaveTaskDetails" onclick="saveTaskDetails()">حفظ</button>
-    </div>
-  </div>
-</div>
-
-<!-- TASK DETAILS (مدير) -->
-<div class="modal-overlay" id="adminTaskDetailsModal">
-  <div class="modal-sheet">
-    <div id="adModalTitle" style="font-size:18px;font-weight:bold;margin-bottom:12px;color:var(--accent);border-bottom:1px solid var(--border);padding-bottom:10px;"></div>
-    <div id="adModalContent" style="font-size:14px;color:var(--text-muted);margin-bottom:20px;line-height:1.6;max-height:30vh;overflow-y:auto;"></div>
-    <div style="font-weight:bold;margin-bottom:10px;font-size:14px;">💬 ملاحظات الأعضاء:</div>
-    <div id="adModalNotes" style="max-height:30vh;overflow-y:auto;margin-bottom:15px;"></div>
-    <button class="modal-cancel" style="width:100%;padding:13px;border-radius:var(--r);font-size:15px;font-family:inherit;cursor:pointer;border:none;" onclick="closeAdminTaskDetails()">إغلاق</button>
-  </div>
-</div>
-
-<!-- CRITICAL MODAL -->
-<div class="modal-overlay" id="criticalModal">
-  <div class="modal-sheet critical-sheet">
-    <div class="critical-top">
-      <div class="critical-icon">🚨</div>
-      <div>
-        <div class="critical-label">تنبيه حرج — تفاعل فوري مطلوب</div>
-        <div class="critical-sub">CRITICAL · OVERRIDE SILENT</div>
-      </div>
-    </div>
-    <div class="modal-task-title" id="modalTaskTitle">...</div>
-    <div class="modal-task-body"  id="modalTaskText">...</div>
-    <div class="modal-btns">
-      <button class="modal-btn-primary"   onclick="acknowledgeAlert()">✅ تم الاستلام — سأتصرف فوراً</button>
-      <button class="modal-btn-secondary" onclick="closeModal()">لاحقاً</button>
-    </div>
-  </div>
-</div>
-
-<!-- MEMBER MODAL -->
-<div class="modal-overlay" id="memberModal">
-  <div class="modal-sheet">
-    <div class="modal-title" id="memberModalTitle">عضو جديد</div>
-    <div class="field"><label>الاسم الكامل</label><input type="text" id="mName" placeholder="أحمد الصحفي"></div>
-    <div class="field"><label>البريد الإلكتروني</label><input type="email" id="mEmail" placeholder="ahmed@newsroom.com"></div>
-    <div class="field"><label>كلمة المرور</label><input type="password" id="mPassword" placeholder="6 أحرف على الأقل"></div>
-    <div class="field"><label>القسم</label>
-      <select id="mDept"><option value="التحرير">التحرير</option><option value="التصوير">التصوير</option><option value="المونتاج">المونتاج</option><option value="التسويق">التسويق</option><option value="عام">عام</option></select>
-    </div>
-    <div class="field"><label>الدور</label>
-      <select id="mRole"><option value="member">👤 عضو</option><option value="admin">🛡️ مدير</option></select>
-    </div>
-    <div class="modal-form-btns">
-      <button class="modal-cancel" onclick="closeMemberModal()">إلغاء</button>
-      <button class="modal-confirm" id="btnCreateMember" onclick="createMember()">إضافة</button>
-    </div>
-  </div>
-</div>
-
-<!-- PROFILE MODAL -->
-<div class="modal-overlay" id="profileModal">
-  <div class="modal-sheet">
-    <div class="modal-title">⚙️ تعديل حسابي</div>
-    <div class="field"><label>الاسم</label><input type="text" id="myProfileName"></div>
-    <div class="field"><label>كلمة مرور جديدة</label><input type="password" id="myProfilePass" placeholder="اتركها فارغة إذا لم ترغب بالتغيير"></div>
-    <div class="modal-form-btns">
-      <button class="modal-cancel" onclick="closeProfileModal()">إلغاء</button>
-      <button class="modal-confirm" onclick="updateMyProfile()">حفظ</button>
-    </div>
-  </div>
-</div>
-
-<!-- CHAT MODAL -->
-<div class="modal-overlay" id="chatModal">
-  <div class="modal-sheet" style="display:flex;flex-direction:column;height:80vh;max-height:80vh;">
-    <div class="sec-header" style="margin-bottom:12px;flex-shrink:0;">
-      <div class="sec-title">💬 الرسائل الخاصة</div>
-      <button class="text-btn" onclick="closeChatModal()">إغلاق ✖</button>
-    </div>
-    <!-- ✅ FIX: قائمة المستخدمين دائماً ظاهرة -->
-    <div id="chatUsersList" class="chat-users-list" style="flex-shrink:0;"></div>
-    <div id="chatArea" style="display:none;flex-direction:column;flex:1;overflow:hidden;border-top:1px solid var(--border);padding-top:10px;min-height:0;">
-      <div id="chatTitle" style="font-weight:bold;margin-bottom:10px;color:var(--accent);font-size:14px;flex-shrink:0;"></div>
-      <div id="chatMessages" style="flex:1;overflow-y:auto;margin-bottom:10px;display:flex;flex-direction:column;"></div>
-      <div style="display:flex;gap:8px;flex-shrink:0;">
-        <input type="text" id="chatInput" placeholder="اكتب رسالتك..."
-          style="flex:1;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:#fff;font-family:inherit;font-size:14px;outline:none;"
-          onkeydown="if(event.key==='Enter')sendChatMessage()">
-        <button class="send-btn" style="width:auto;padding:0 20px;font-size:14px;" onclick="sendChatMessage()">إرسال</button>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- ════ LOGIN ════ -->
-<div class="screen active" id="screen-login">
-  <div class="login-wrap">
-    <div class="login-logo">
-      <div class="login-icon">📡</div>
-      <h1>MOTS</h1>
-      <p>Media Operations & Task System</p>
-    </div>
-    <div id="loginError" class="login-error"></div>
-    <div class="login-card">
-    <div class="field"><label>البريد الإلكتروني</label><input type="email" id="loginEmail" placeholder="your@email.com" inputmode="email" autocomplete="email"></div>
-    <div class="field"><label>كلمة المرور</label><input type="password" id="loginPass" placeholder="••••••••" onkeydown="if(event.key==='Enter')doLogin()"></div>
-    <button class="login-btn" id="btnLogin" onclick="doLogin()">دخول</button>
-    </div>
-  </div>
-</div>
-
-<!-- ════ ADMIN ════ -->
-<div class="screen" id="screen-admin">
-  <div class="drawer-overlay" id="drawerOverlay" onclick="closeDrawer()"></div>
-  <div class="drawer" id="drawer">
-    <div class="drawer-header">
-      <div class="avatar" style="width:44px;height:44px;font-size:18px;" onclick="openProfileModal()">م</div>
-      <div><div class="drawer-name" id="adminUserName">المدير</div><div class="drawer-role">لوحة التحكم</div></div>
-    </div>
-    <div class="drawer-item" onclick="showAdminTab('overview')"><span>📊</span> نظرة عامة</div>
-    <div class="drawer-item" onclick="showAdminTab('send')"><span>📤</span> إرسال مهمة</div>
-    <div class="drawer-item" onclick="showAdminTab('tracking')"><span>👁</span> الرصد والتتبع</div>
-    <div class="drawer-item" onclick="showAdminTab('notes')"><span>📝</span> الملاحظات</div>
-    <div class="drawer-item" onclick="showAdminTab('members')"><span>👥</span> إدارة الأعضاء</div>
-    <div class="drawer-item" onclick="openChatModal();closeDrawer()"><span>💬</span> الرسائل الخاصة</div>
-    <div class="drawer-item" onclick="openProfileModal();closeDrawer()"><span>⚙️</span> تعديل حسابي</div>
-    <div class="drawer-item danger" onclick="logout()"><span>🚪</span> تسجيل الخروج</div>
-  </div>
-  <div class="topbar">
-    <div class="topbar-logo"><div class="topbar-logo-icon">📡</div>MOTS</div>
-    <div class="topbar-spacer"></div>
-    <div class="avatar" id="adminAvatar" onclick="openProfileModal()">م</div>
-    <div class="menu-btn" onclick="openDrawer()">☰</div>
-  </div>
-  <div class="scroll-area">
-    <div class="admin-page active" id="page-overview">
-      <div class="stats-grid">
-        <div class="stat-box"><div class="stat-box-label">إجمالي المهام</div><div class="stat-box-value c-accent" id="statTotal">—</div></div>
-        <div class="stat-box"><div class="stat-box-label">معلقة</div><div class="stat-box-value c-red" id="statPending">—</div></div>
-        <div class="stat-box"><div class="stat-box-label">مكتملة</div><div class="stat-box-value c-green" id="statDone">—</div></div>
-        <div class="stat-box"><div class="stat-box-label">الأعضاء</div><div class="stat-box-value c-blue" id="statMembers">—</div></div>
-      </div>
-      <div class="sec-header">
-        <div class="sec-title">آخر المهام</div>
-        <button class="text-btn" onclick="showAdminTab('send')">+ جديدة</button>
-      </div>
-      <div id="adminTaskList"><div class="loading-wrap"><div class="spinner"></div></div></div>
-    </div>
-    <div class="admin-page" id="page-send">
-      <div class="sec-title" style="margin-bottom:16px">📤 إرسال توجيه جديد</div>
-      <div class="send-form"><div class="form-inner">
-        <div class="field" style="margin:0"><label>عنوان المهمة</label><input type="text" id="fTitle" placeholder="مثال: تغطية مؤتمر صحفي"></div>
-        <div class="field" style="margin:0"><label>نص التوجيه</label><textarea id="fContent" placeholder="التعليمات الكاملة..."></textarea></div>
-        <div class="field" style="margin:0"><label>إرفاق ملف (اختياري)</label><input type="file" id="fFile"></div>
-        <div class="field" style="margin:0"><label>التصنيف</label>
-          <select id="fCategory"><option>حملات إعلامية</option><option>متابعة عاجلة</option><option>اهتمام وتسويق</option></select>
-        </div>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-badge">N</span>
         <div>
-          <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">درجة الأهمية</div>
-          <div class="pri-group">
-            <button class="pri-btn active" data-p="عاجل" onclick="setPriority(this)">🔴 عاجل</button>
-            <button class="pri-btn" data-p="مهم"  onclick="setPriority(this)">🟡 مهم</button>
-            <button class="pri-btn" data-p="عادي" onclick="setPriority(this)">🔵 عادي</button>
-          </div>
+          <h1>نبض</h1>
+          <p>News Intelligence</p>
         </div>
-        <div class="field" style="margin:0"><label>نوع التنبيه</label>
-          <select id="fNotifType"><option value="normal">🔔 عادي</option><option value="critical">🚨 حرج (Override Silent)</option></select>
-        </div>
-        <div>
-          <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">تحديد حسب القسم</div>
-          <select onchange="filterRecipientsByDept(this.value)" style="width:100%;padding:10px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm);margin-bottom:10px;font-family:inherit;outline:none;">
-            <option value="">اختر قسماً...</option>
-            <option value="التحرير">التحرير</option><option value="التصوير">التصوير</option>
-            <option value="المونتاج">المونتاج</option><option value="التسويق">التسويق</option><option value="عام">عام</option>
-          </select>
-          <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">إرسال إلى</div>
-          <div class="row-btns">
-            <button class="row-btn" onclick="selectAll()">تحديد الكل</button>
-            <button class="row-btn" onclick="selectNone()">إلغاء الكل</button>
-          </div>
-          <div class="recip-grid" id="recipientsGrid"><div class="loading-wrap"><div class="spinner"></div></div></div>
-        </div>
-        <button class="send-btn" id="btnSend" onclick="sendTask()">📤 إرسال التوجيه</button>
-      </div></div>
-    </div>
-    <div class="admin-page" id="page-tracking">
-      <div class="sec-header"><div class="sec-title">👁 الرصد والتتبع</div><span style="font-size:11px;color:var(--green)">● مباشر</span></div>
-      <div id="trackingList"><div class="loading-wrap"><div class="spinner"></div></div></div>
-    </div>
-    <div class="admin-page" id="page-notes">
-      <div class="sec-header"><div class="sec-title">📝 ملاحظات الأعضاء</div></div>
-      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r);overflow-x:auto;">
-        <table class="notes-table">
-          <thead><tr><th>المهمة</th><th>الكاتب</th><th>الملاحظة</th></tr></thead>
-          <tbody id="adminNotesTableBody"><tr><td colspan="3" style="text-align:center;padding:24px;color:var(--text-muted);font-size:13px;">لا توجد ملاحظات بعد</td></tr></tbody>
-        </table>
       </div>
-    </div>
-    <div class="admin-page" id="page-members">
-      <div class="sec-header">
-        <div class="sec-title">👥 إدارة الأعضاء</div>
-        <button class="send-btn" style="width:auto;padding:10px 16px;font-size:13px;" onclick="openNewMemberModal()">➕ عضو جديد</button>
-      </div>
-      <div id="membersList"><div class="loading-wrap"><div class="spinner"></div></div></div>
-    </div>
-  </div>
-  <div class="bottom-nav">
-    <button class="bottom-nav-btn active" onclick="showAdminTab('overview')"><div class="nav-icon">📊</div>عامة</button>
-    <button class="bottom-nav-btn" onclick="showAdminTab('send')"><div class="nav-icon">📤</div>إرسال</button>
-    <button class="bottom-nav-btn" onclick="showAdminTab('tracking')"><div class="nav-icon">👁</div>الرصد</button>
-    <button class="bottom-nav-btn" onclick="showAdminTab('notes')"><div class="nav-icon">📝</div>ملاحظات</button>
-    <button class="bottom-nav-btn" onclick="showAdminTab('members')"><div class="nav-icon">👥</div>الأعضاء</button>
-  </div>
-</div>
 
-<!-- ════ MEMBER ════ -->
-<div class="screen" id="screen-member">
-  <div class="drawer-overlay" id="memberDrawerOverlay" onclick="closeMemberDrawer()"></div>
-  <div class="drawer" id="memberDrawer">
-    <div class="drawer-header">
-      <div class="avatar" id="drawerMemberAvatar" style="width:44px;height:44px;font-size:18px;" onclick="openProfileModal()">أ</div>
-      <div><div class="drawer-name" id="drawerMemberName">عضو</div><div class="drawer-role" id="drawerMemberDept">عام</div></div>
-    </div>
-    <div class="drawer-item" onclick="closeMemberDrawer()"><span>📋</span> مهامي</div>
-    <div class="drawer-item" onclick="openChatModal();closeMemberDrawer()"><span>💬</span> الرسائل الخاصة</div>
-    <div class="drawer-item" onclick="openProfileModal();closeMemberDrawer()"><span>⚙️</span> تعديل حسابي</div>
-    <div class="drawer-item danger" onclick="logout()"><span>🚪</span> تسجيل الخروج</div>
-  </div>
+      <nav class="nav-links">
+        <a href="#" class="active">الرئيسية</a>
+        <a href="#">الأخبار العاجلة</a>
+        <a href="#">الاقتصاد</a>
+        <a href="#">التقنية</a>
+        <a href="#">الرياضة</a>
+        <a href="#">الثقافة</a>
+      </nav>
 
-  <!-- ✅ FIX: Topbar نظيف بدون أرقام غريبة -->
-  <div class="topbar">
-    <div class="topbar-logo"><div class="topbar-logo-icon">📡</div>MOTS</div>
-    <div class="topbar-spacer"></div>
-    <!-- عداد المهام غير المقروءة فقط عند وجودها -->
-    <div id="memberBadge" class="badge-dot" style="display:none;margin-left:8px;">0</div>
-    <div class="avatar" id="memberAvatar" onclick="openProfileModal()">أ</div>
-    <div class="menu-btn" onclick="openMemberDrawer()">☰</div>
-  </div>
+      <section class="mini-card">
+        <h3>مؤشر الأخبار</h3>
+        <div class="meter"><span style="width: 74%"></span></div>
+        <p>تحديث المحتوى: قبل 4 دقائق</p>
+      </section>
+    </aside>
 
-  <div style="padding:12px 16px 0;flex-shrink:0;">
-    <div class="filter-tabs">
-      <button class="filter-btn active" onclick="filterMemberTasks('all',this)">📋 جميع المهام</button>
-      <button class="filter-btn" onclick="filterMemberTasks('urgent',this)">⚡ عاجلة</button>
-      <button class="filter-btn" onclick="filterMemberTasks('done',this)">✅ مكتملة</button>
-    </div>
-  </div>
+    <main class="main-content">
+      <header class="topbar">
+        <div class="search-box">
+          <input type="text" placeholder="ابحث عن خبر، كلمة مفتاحية، أو كاتب..." />
+        </div>
+        <button class="cta">+ خبر جديد</button>
+      </header>
 
-  <div class="scroll-area" style="padding-bottom:24px;">
-    <div id="memberTaskList"><div class="loading-wrap"><div class="spinner"></div></div></div>
-  </div>
-</div>
+      <section class="stats-grid">
+        <article class="stat-card">
+          <h4>إجمالي الأخبار</h4>
+          <strong>1,284</strong>
+          <small>+12% هذا الأسبوع</small>
+        </article>
+        <article class="stat-card">
+          <h4>زوار اليوم</h4>
+          <strong>98K</strong>
+          <small>تفاعل مرتفع</small>
+        </article>
+        <article class="stat-card">
+          <h4>الأخبار العاجلة</h4>
+          <strong>27</strong>
+          <small>آخر تحديث 10:45</small>
+        </article>
+        <article class="stat-card">
+          <h4>المراسلون النشطون</h4>
+          <strong>43</strong>
+          <small>في 11 مدينة</small>
+        </article>
+      </section>
 
+      <section class="hero-news">
+        <div class="hero-content">
+          <span class="tag">عاجل</span>
+          <h2>إطلاق مبادرة وطنية لدعم الابتكار الرقمي في قطاع الإعلام</h2>
+          <p>
+            أعلنت الجهات التنظيمية عن خطة تطوير تمتد لثلاث سنوات تستهدف دعم المنصات الإخبارية
+            الحديثة ورفع جودة المحتوى المحلي عبر أدوات الذكاء الاصطناعي والتحقق الرقمي.
+          </p>
+          <button>اقرأ التفاصيل</button>
+        </div>
+        <div class="hero-meta">
+          <div><b>الكاتب:</b> غرفة الأخبار</div>
+          <div><b>القسم:</b> تقنية / إعلام</div>
+          <div><b>زمن القراءة:</b> 5 دقائق</div>
+        </div>
+      </section>
+
+      <section class="cards-grid">
+        <article class="news-card">
+          <span>اقتصاد</span>
+          <h3>ارتفاع الاستثمارات في الشركات الناشئة بنسبة 18% خلال الربع الأول</h3>
+          <p>مؤشرات إيجابية في التمويل الجريء وسط توسع حلول المدفوعات الرقمية.</p>
+        </article>
+        <article class="news-card">
+          <span>رياضة</span>
+          <h3>إعلان جدول الموسم الجديد مع نظام بث تفاعلي للجماهير</h3>
+          <p>تحسين تجربة المتابعة المباشرة مع إحصائيات فورية وتحليلات لحظية.</p>
+        </article>
+        <article class="news-card">
+          <span>تقنية</span>
+          <h3>منصات الذكاء الاصطناعي تعيد تشكيل أساليب إنتاج المحتوى الصحفي</h3>
+          <p>غرف الأخبار تتجه للأتمتة الذكية مع الحفاظ على المراجعة التحريرية البشرية.</p>
+        </article>
+      </section>
+    </main>
+
+    <aside class="right-panel">
+      <section class="widget">
+        <h3>الأكثر قراءة</h3>
+        <ul>
+          <li>تقرير: سوق العمل الرقمي يسجل نموًا قياسيًا</li>
+          <li>تحليل: كيف تؤثر السياسات النقدية على الشركات التقنية؟</li>
+          <li>مقابلة خاصة مع رائد أعمال في مجال الإعلام</li>
+          <li>رصد يومي: أبرز 10 أخبار عالمية</li>
+        </ul>
+      </section>
+
+      <section class="widget">
+        <h3>النشرة البريدية</h3>
+        <p>اشترك ليصلك ملخص الأخبار صباحًا ومساءً.</p>
+        <input type="email" placeholder="البريد الإلكتروني" />
+        <button>اشتراك الآن</button>
+      </section>
+    </aside>
+  </div>
 </body>
 </html>
